@@ -5,7 +5,7 @@ class Ui_SettingsWindow(object):
     def setupUi(self, Dialog):
         Dialog.setWindowTitle("Settings")
         Dialog.resize(400, 300)
-        Dialog.setStyleSheet("background-color: #f7f9fc; color: #1f2937;")
+        Dialog.setStyleSheet("")
 
         self.layout = QtWidgets.QVBoxLayout(Dialog)
 
@@ -25,5 +25,4 @@ class Ui_SettingsWindow(object):
 
         # Save Button
         self.saveButton = QtWidgets.QPushButton("Save")
-        self.saveButton.setStyleSheet("background-color: #e5e7eb; padding: 10px; border-radius: 5px; border: 1px solid #d1d5db; color: #111827;")
         self.layout.addWidget(self.saveButton)
