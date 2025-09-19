@@ -1,7 +1,37 @@
-from PyQt6.QtWidgets import QMainWindow, QFileDialog, QMessageBox
-from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
+from PyQt6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QSystemTrayIcon, QGroupBox, QVBoxLayout, QHBoxLayout, QTextBrowser, QLineEdit, QPushButton, QWidget, QComboBox, QLabel, QApplication, QGraphicsOpacityEffect
+from PyQt6.QtCore import QPropertyAnimation, QEasingCurve, QThread, QObject, pyqtSignal, pyqtSlot, QTimer
+from PyQt6.QtGui import QIcon, QPdfWriter, QPageSize, QTextDocument, QFont
+import json
+import re
+import os
+import shutil
 from ui_main_window import Ui_MainWindow
 from settings_window import SettingsWindow
+from typing import Optional
+import base64
+import mimetypes
+import locale
+
+# Optional imports for file text extraction
+try:
+    from PyPDF2 import PdfReader  # type: ignore
+except Exception:
+    PdfReader = None  # type: ignore
+
+try:
+    from docx import Document  # type: ignore
+except Exception:
+    Document = None  # type: ignore
+
+try:
+    import google.generativeai as genai  # type: ignore
+except Exception:
+    genai = None  # type: ignore
+
+try:
+    import ollama as ollama_client  # Python client
+except Exception:
+    ollama_client = None
 
 
 class MainWindow(QMainWindow):
@@ -9,12 +39,31 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
+        self._selected_file_path: str = ""
 
         # Settings Window
-        self.settings_window = SettingsWindow()
+        self.settings_window = SettingsWindow(self)
+        # Language/status state
+        self._current_lang = "en"
+        self._last_status_text = "Ready"
+        # Default typing label base
+        self._typing_label_base = "Assistant is typing"
+
+        # System tray icon for notifications
+        self.tray_icon = None
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray_icon = QSystemTrayIcon(self)
+            try:
+                self.tray_icon.setIcon(QIcon("assets/logo.png"))
+            except Exception:
+                pass
+            self.tray_icon.setVisible(True)
 
         # Sidebar toggle state and animation setup
-        self.sidebar_visible = True
+
+
+
+        self.sidebar_visible = False
         self.sidebar_expanded_width = 240
         self.ui.sidebarPanel.setMinimumWidth(0)
         self.ui.sidebarPanel.setMaximumWidth(self.sidebar_expanded_width)
@@ -22,37 +71,621 @@ class MainWindow(QMainWindow):
         self.sidebar_animation.setDuration(250)
         self.sidebar_animation.setEasingCurve(QEasingCurve.Type.InOutCubic)
 
+
+        # Sidebar toggle state and animation setup 
+        # - change/remove this to show the sidebar menu again
+        self.sidebar_visible = False                      # mark as collapsed
+        self.sidebar_expanded_width = 240
+        self.ui.sidebarPanel.setMinimumWidth(0)
+        self.ui.sidebarPanel.setMaximumWidth(0)           # collapse to 0 on startup
+        # Optional: completely hide the widget (no space taken)
+        # self.ui.sidebarPanel.setVisible(False)
+
+        # - change/remove this to show the sidebar menu again
+
         # Connect buttons
-        self.ui.chooseFileButton.clicked.connect(self.choose_file)
-        self.ui.analyzeButton.clicked.connect(self.fake_analyze)
+        # Old external choose file button removed; hook internal dropArea browse
+        self.ui.analyzeButton.clicked.connect(self.analyze_document)
         self.ui.settingsButton.clicked.connect(self.open_settings)
+        # Top settings mirrors sidebar settings
+        if hasattr(self.ui, 'topSettingsButton'):
+            self.ui.topSettingsButton.clicked.connect(self.open_settings)
         self.ui.exportButton.clicked.connect(self.export_pdf)
+        if hasattr(self.ui, 'copySummaryButton'):
+            self.ui.copySummaryButton.clicked.connect(self.copy_summary_to_clipboard)
         self.ui.toggleSidebarButton.clicked.connect(self.toggle_sidebar)
+        if hasattr(self.ui, 'refreshModelsButton'):
+            self.ui.refreshModelsButton.clicked.connect(self.refresh_models)
+
+        # Connect DropArea signal if available
+        if hasattr(self.ui, 'dropArea'):
+            try:
+                self.ui.dropArea.fileDropped.connect(self._on_file_dropped)
+                self.ui.dropArea.browseRequested.connect(self.choose_file)
+            except Exception:
+                pass
+
+        # Background refresh state (init before any refresh call)
+        self._refresh_thread = None
+        self._refresh_worker = None
+        self._is_refreshing = False
+        self._settings_open = False
+
+        # Model source and list
+        # Config lives in %APPDATA%/AI Document Analyzer/config.json (copied from working dir if present on first run)
+        self.app_config_dir = self._appdata_config_dir()
+        try:
+            os.makedirs(self.app_config_dir, exist_ok=True)
+        except Exception:
+            pass
+        self.config_path = os.path.join(self.app_config_dir, "config.json")
+        # Initialize language to English by default (no persistence)
+        self.apply_language("en")
+        self.online_models_gemini = [
+            "gemini-2.5-flash",
+        ]
+        if hasattr(self.ui, 'modelSourceCombo'):
+            self.ui.modelSourceCombo.clear()
+            self.ui.modelSourceCombo.addItems(["Online (Google Gemini)", "Offline (Ollama LLaMA)"])
+            # Always set Gemini as default (index 0 - first)
+            self.ui.modelSourceCombo.setCurrentIndex(0)
+            self.ui.modelSourceCombo.setEnabled(True)
+            self.ui.modelSourceCombo.currentIndexChanged.connect(self.on_model_source_changed)
+        if hasattr(self.ui, 'availableModelCombo'):
+            self.ui.availableModelCombo.clear()
+        self.on_model_source_changed()
+
+        # Status bar initial state
+        if hasattr(self.ui, 'statusbar'):
+            self._set_status("Ready")
+
+        # Analyze button loader state
+        self._analyze_loader_timer = QTimer(self)
+        self._analyze_loader_timer.setInterval(300)
+        self._analyze_loader_timer.timeout.connect(self._tick_analyze_loader)
+        self._analyze_loader_phase = 0
+        self._analyze_button_base = self._get_analyze_button_text()
+        self._analysis_thread = None
+        self._analysis_worker = None
+        # NOTE: Refresh state is initialized earlier; do not reset here to avoid
+        # losing in-flight refresh state or leaving UI stuck in loading.
+
+        # --- Q&A Chat UI (below Export button) ---
+        self._last_summary_text: str = ""
+        self._last_input_text_for_qa: str = ""
+        self._qa_thread = None
+        self._qa_worker = None
+        self._qa_messages = []  # list of {role: 'user'|'assistant', content: str}
+        self._last_summary_json = None  # parsed JSON dict when available
+
+        self.ui.qaGroup = QGroupBox("Q&A Chat")
+        qa_group_layout = QVBoxLayout(self.ui.qaGroup)
+        qa_group_layout.setContentsMargins(8, 8, 8, 8)
+
+        self.ui.chatHistoryBrowser = QTextBrowser()
+        self.ui.chatHistoryBrowser.setOpenExternalLinks(True)
+        qa_group_layout.addWidget(self.ui.chatHistoryBrowser)
+
+        # Typing indicator label (hidden by default)
+        self.ui.typingLabel = QLabel("")
+        self.ui.typingLabel.setVisible(False)
+        qa_group_layout.addWidget(self.ui.typingLabel)
+
+        qa_controls = QWidget()
+        qa_controls_layout = QHBoxLayout(qa_controls)
+        qa_controls_layout.setContentsMargins(0, 0, 0, 0)
+
+        # Removed chat context dropdown per requirement
+        self.ui.questionLineEdit = QLineEdit()
+        self.ui.questionLineEdit.setPlaceholderText("Ask a question about the summary...")
+        self.ui.sendQuestionButton = QPushButton("Send")
+        self.ui.clearChatButton = QPushButton("Clear")
+
+        qa_controls_layout.addWidget(self.ui.questionLineEdit, 1)
+        qa_controls_layout.addWidget(self.ui.sendQuestionButton)
+        qa_controls_layout.addWidget(self.ui.clearChatButton)
+        qa_group_layout.addWidget(qa_controls)
+
+        # Insert just below the Export button in the right panel
+        if hasattr(self.ui, 'rightLayout'):
+            self.ui.rightLayout.addWidget(self.ui.qaGroup)
+
+        # Disabled until a summary is generated
+        self._qa_opacity_effect = QGraphicsOpacityEffect(self.ui.qaGroup)
+        try:
+            self.ui.qaGroup.setGraphicsEffect(self._qa_opacity_effect)
+        except Exception:
+            pass
+        self._set_qa_group_enabled(False)
+
+        # Wire up actions
+        self.ui.sendQuestionButton.clicked.connect(self._send_question)
+        self.ui.clearChatButton.clicked.connect(self._clear_chat)
+        try:
+            self.ui.questionLineEdit.returnPressed.connect(self._send_question)  # type: ignore[attr-defined]
+        except Exception:
+            pass
+
+        # Typing indicator timer for Q&A
+        self._qa_typing_timer = QTimer(self)
+        self._qa_typing_timer.setInterval(300)
+        self._qa_typing_timer.timeout.connect(self._tick_qa_typing_indicator)
+        self._qa_typing_phase = 0
+
+        # Ensure UI is localized to current runtime language
+        self.apply_language(getattr(self, "_current_lang", "en"))
+
+
+    def _appdata_config_dir(self) -> str:
+        try:
+            appdata = os.getenv("APPDATA") or os.path.expanduser("~")
+            return os.path.join(appdata, "AI Document Analyzer")
+        except Exception:
+            return os.getcwd()
+
+    def copy_summary_to_clipboard(self):
+        text = self.ui.summaryTextEdit.toPlainText() if hasattr(self.ui, 'summaryTextEdit') else ""
+        if not text:
+            QMessageBox.information(self, "Copy", "There is no summary to copy.")
+            return
+        try:
+            QApplication.clipboard().setText(text)
+            self._set_status("Summary copied to clipboard")
+        except Exception as e:
+            QMessageBox.critical(self, "Copy Error", f"Failed to copy summary:\n{e}")
+
+    def _set_loading(self, is_loading: bool):
+        if is_loading:
+            self.ui.analyzeButton.setEnabled(False)
+            self._analyze_loader_phase = 0
+            self._analyze_loader_timer.start()
+        else:
+            self._analyze_loader_timer.stop()
+            # Reset to localized base label
+            self.ui.analyzeButton.setText(self._get_analyze_button_text())
+            self.ui.analyzeButton.setEnabled(True)
+
+    def _tick_analyze_loader(self):
+        is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+        base = "جاري التحليل" if is_ar else "Analyzing"
+        phases = [base, base + ".", base + "..", base + "..."]
+        self._analyze_loader_phase = (self._analyze_loader_phase + 1) % len(phases)
+        self.ui.analyzeButton.setText(phases[self._analyze_loader_phase])
 
     def choose_file(self):
         file_dialog = QFileDialog(self)
-        file_dialog.setNameFilters(["Documents (*.pdf *.doc *.docx)", "Images (*.png *.jpg *.jpeg)"])
+        file_dialog.setNameFilters(["Documents and Images (*.pdf *.docx *.txt *.png *.jpg *.jpeg)"])
         if file_dialog.exec():
             selected_file = file_dialog.selectedFiles()[0]
-            self.ui.filePathEdit.setPlainText(selected_file)
+            self._selected_file_path = selected_file
+            if hasattr(self.ui, 'dropArea'):
+                try:
+                    self.ui.dropArea.setSelectedFileName(selected_file)
+                except Exception:
+                    pass
 
-    def fake_analyze(self):
-        self.ui.summaryTextEdit.setPlainText(
-            "🔹 Document successfully uploaded.\n"
-            "🔹 Analysis is not implemented yet.\n"
-            "🔹 This is a UI preview only."
+    @pyqtSlot(str)
+    def _on_file_dropped(self, file_path: str):
+        if not file_path:
+            return
+        self._selected_file_path = file_path
+        if hasattr(self.ui, 'dropArea'):
+            try:
+                self.ui.dropArea.setSelectedFileName(file_path)
+            except Exception:
+                pass
+
+    def analyze_document(self):
+        source = self.ui.modelSourceCombo.currentText() if hasattr(self.ui, 'modelSourceCombo') else ""
+        file_path = self._get_selected_file_path()
+        is_image = bool(file_path and self.is_image_file(file_path))
+        input_text = self._get_input_text()
+        if not file_path and not input_text:
+            QMessageBox.information(self, "Input Required", "Please paste text or choose a supported file (PDF/DOCX/TXT/PNG/JPG).")
+            return
+
+        provider = ""
+        model = self.ui.availableModelCombo.currentText() if hasattr(self.ui, 'availableModelCombo') else ""
+        if source.startswith("Offline"):
+            provider = "ollama"
+            if not ollama_client:
+                QMessageBox.warning(self, "Ollama", "Ollama client not available. Please install ollama and its Python package.")
+                return
+            if not self.is_ollama_server_running():
+                QMessageBox.warning(self, "Ollama", "Ollama server is not running. Please start the Ollama service.")
+                return
+            if not model or model.startswith("Ollama not") or model.startswith("No models") or model.startswith("Ollama server"):
+                QMessageBox.information(self, "Ollama", "No valid local model selected.")
+                return
+            self._set_status(f"Offline - Running {model}...")
+        elif "Gemini" in source:
+            provider = "gemini"
+            if not model or model.startswith("Missing"):
+                QMessageBox.information(self, "Gemini", "Please select a valid Gemini model.")
+                return
+            key = self._get_gemini_key()
+            if not key:
+                QMessageBox.warning(self, "Gemini", "Missing GOOGLE_API_KEY. Add it in Settings.")
+                return
+            if genai is None:
+                QMessageBox.warning(self, "Gemini", "Google Generative AI SDK not installed. Please install 'google-generativeai'.")
+                return
+            self._set_status(f"Online - Gemini {model} ...")
+        else:
+            QMessageBox.information(self, "Analysis", "Please select a valid source and model.")
+            return
+
+        # NOTE: Any heavy operations (like file text extraction) are handled in the worker thread now
+
+        # Prepare params for background execution
+        params = {
+            "provider": provider,
+            "model": model,
+            "is_image": is_image,
+            "file_path": file_path,
+            "input_text": input_text,
+            "gemini_key": self._get_gemini_key() if provider == "gemini" else "",
+        }
+
+        # Reset and prepare Q&A chat state
+        self._last_input_text_for_qa = input_text or ""
+        self._last_summary_text = ""
+        self._clear_chat()
+        self._qa_messages = []
+        self._set_qa_group_enabled(False)
+        self._stop_qa_typing_indicator()
+
+        self._start_background_analysis(params)
+
+    def _prepare_qa_context_options(self):
+        # Context dropdown removed; nothing to prepare
+        return
+
+    def _escape_html(self, s: str) -> str:
+        return s.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+    def _append_chat(self, role: str, text: str):
+        role_lower = role.lower()
+        is_user = role_lower in {"you", "user"}
+        is_assistant = role_lower in {"assistant"}
+        # Unified alignment: left in English, right in Arabic
+        try:
+            is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+        except Exception:
+            is_ar = False
+        align = 'right' if is_ar else 'left'
+        direction = 'rtl' if is_ar else 'ltr'
+
+        # Colors and label
+        if is_user:
+            label = "User"
+        elif is_assistant:
+            label = "Assistant"
+        else:  # Error or other
+            bg = "#FFF5F5"
+            fg = "#b10f2e"
+            border = "#b10f2e"
+            label = role
+
+        # Default bubble style (same for user and assistant)
+        if is_user or is_assistant:
+            bg = "#FFFFFF"
+            fg = "#000000"
+            border = "#E0E0E0"
+
+        # Use same corner style for both
+        corner = "border-top-left-radius: 4px; border-top-right-radius: 12px; border-bottom-left-radius: 12px; border-bottom-right-radius: 12px;"
+
+        content = self._escape_html(text).replace("\n", "<br>")
+        # Inline label with a space after the colon
+        content_with_label = f"<span style='font-weight:600'>{self._escape_html(label)}: </span>{content}"
+
+        html = (
+            f"<p align='{align}' dir='{direction}' style='margin:6px 0;'>"
+            f"  <span style='display:inline-block; max-width:85%; background:{bg}; color:{fg};"
+            f"    padding:8px 12px; border:1px solid {border}; {corner}"
+            f"    white-space:pre-wrap; word-wrap:break-word;' dir='{direction}'>"
+            f"    {content_with_label}"
+            f"  </span>"
+            f"</p>"
         )
+        self.ui.chatHistoryBrowser.append(html)
+        self.ui.chatHistoryBrowser.verticalScrollBar().setValue(self.ui.chatHistoryBrowser.verticalScrollBar().maximum())
+
+    def _clear_chat(self):
+        try:
+            self.ui.chatHistoryBrowser.clear()
+        except Exception:
+            pass
+        # Also clear in-memory history
+        self._qa_messages = []
+
+    def _append_history(self, role: str, content: str):
+        self._qa_messages.append({"role": role, "content": content})
+
+    def _format_messages_for_prompt(self, messages: list, max_messages: int = 10) -> str:
+        # Convert last N messages into a simple transcript
+        recent = messages[-max_messages:] if messages else []
+        lines = []
+        for m in recent:
+            role = m.get("role", "user")
+            content = m.get("content", "")
+            prefix = "User" if role == "user" else "Assistant"
+            lines.append(f"{prefix}: {content}")
+        return "\n".join(lines)
+
+    def _set_qa_controls_enabled(self, enabled: bool):
+        self.ui.sendQuestionButton.setEnabled(enabled)
+        self.ui.questionLineEdit.setEnabled(enabled)
+        try:
+            if hasattr(self.ui, 'chatContextCombo'):
+                self.ui.chatContextCombo.setEnabled(enabled)
+        except Exception:
+            pass
+
+    def _set_qa_group_enabled(self, enabled: bool):
+        # Enable/disable interactivity
+        self.ui.qaGroup.setEnabled(enabled)
+        # Apply a faded look when disabled
+        try:
+            if not hasattr(self, '_qa_opacity_effect') or self._qa_opacity_effect is None:
+                self._qa_opacity_effect = QGraphicsOpacityEffect(self.ui.qaGroup)
+                self.ui.qaGroup.setGraphicsEffect(self._qa_opacity_effect)
+            self._qa_opacity_effect.setOpacity(1.0 if enabled else 0.4)
+        except Exception:
+            pass
+
+    def _send_question(self):
+        question = self.ui.questionLineEdit.text().strip()
+        if not question:
+            return
+        if not self._last_summary_text.strip():
+            QMessageBox.information(self, "Q&A", "Please generate a summary first.")
+            return
+
+        self._append_chat("You", question)
+        self._append_history("user", question)
+        self.ui.questionLineEdit.clear()
+        self._set_qa_controls_enabled(False)
+        self._start_qa_typing_indicator()
+
+        # Context dropdown removed; default to using summary only
+        include_input = False
+        provider = self.ui.modelSourceCombo.currentText() if hasattr(self.ui, 'modelSourceCombo') else ""
+        model = self.ui.availableModelCombo.currentText() if hasattr(self.ui, 'availableModelCombo') else ""
+        params = {
+            "provider": "ollama" if provider.startswith("Offline") else ("gemini" if "Gemini" in provider else ""),
+            "model": model,
+            "messages": list(self._qa_messages),
+            "summary": self._last_summary_text,
+            "input_text": self._last_input_text_for_qa if include_input else "",
+            "gemini_key": self._get_gemini_key() if "Gemini" in provider else "",
+        }
+
+        thread = QThread(self)
+        worker = _QAWorker(self, params)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_qa_finished)
+        worker.error.connect(self._on_qa_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._qa_thread = thread
+        self._qa_worker = worker
+        thread.start()
+
+    def _on_qa_finished(self, answer_text: str):
+        self._append_chat("Assistant", answer_text or "(No answer)")
+        if answer_text:
+            self._append_history("assistant", answer_text)
+        self._set_qa_controls_enabled(True)
+        self._stop_qa_typing_indicator()
+
+    def _on_qa_error(self, error_message: str):
+        if error_message:
+            self._append_chat("Error", error_message)
+            QMessageBox.critical(self, "Q&A Error", error_message)
+        self._set_qa_controls_enabled(True)
+        self._stop_qa_typing_indicator()
+
+    def _start_qa_typing_indicator(self):
+        try:
+            self._qa_typing_phase = 0
+            self.ui.typingLabel.setVisible(True)
+            self.ui.typingLabel.setText("Assistant is typing")
+            self._qa_typing_timer.start()
+        except Exception:
+            pass
+
+    def _stop_qa_typing_indicator(self):
+        try:
+            self._qa_typing_timer.stop()
+            self.ui.typingLabel.setVisible(False)
+        except Exception:
+            pass
+
+    def _tick_qa_typing_indicator(self):
+        base = self._typing_label_base or "Assistant is typing"
+        phases = [base, base + ".", base + "..", base + "..."]
+        self._qa_typing_phase = (self._qa_typing_phase + 1) % len(phases)
+        self.ui.typingLabel.setText(phases[self._qa_typing_phase])
+
+    def apply_language(self, lang: str):
+        is_ar = (lang == "ar")
+        try:
+            self._current_lang = 'ar' if is_ar else 'en'
+            self.setWindowTitle("محلل المستندات الذكي" if is_ar else "AI Document Analyzer")
+            self.ui.newChatButton.setText("＋ تحليل جديد" if is_ar else "＋ New Analysis")
+            self.ui.availableModelLabel.setText("النموذج\u200F:" if is_ar else "Model:")
+            self.ui.modelSourceLabel.setText("المصدر\u200F:" if is_ar else "Source:")
+            self.ui.refreshModelsButton.setText("تحديث" if is_ar else "Refresh")
+            self.ui.topSettingsButton.setText("الإعدادات" if is_ar else "Settings")
+            self.ui.analyzeButton.setText("تحليل المستند" if is_ar else "Analyze Document")
+            # Keep base text in sync with localization
+            try:
+                self._analyze_button_base = self._get_analyze_button_text()
+            except Exception:
+                pass
+            self.ui.exportButton.setText("تصدير الملخص كملف PDF" if is_ar else "Export Summary as PDF")
+            if hasattr(self.ui, 'copySummaryButton'):
+                self.ui.copySummaryButton.setText("نسخ الملخص" if is_ar else "Copy Summary")
+            self.ui.questionLineEdit.setPlaceholderText("اسأل سؤالاً حول الملخص..." if is_ar else "Ask a question about the summary...")
+            # Summary placeholder
+            if hasattr(self.ui, 'summaryTextEdit'):
+                self.ui.summaryTextEdit.setPlaceholderText("سيظهر التحليل هنا..." if is_ar else "Your analysis will appear here...")
+            # Tabs text: Upload / Paste
+            if hasattr(self.ui, 'tabs') and hasattr(self.ui, 'uploadTab') and hasattr(self.ui, 'pasteTab'):
+                try:
+                    self.ui.tabs.setTabText(self.ui.tabs.indexOf(self.ui.uploadTab), "رفع مستند" if is_ar else "Upload Document")
+                    self.ui.tabs.setTabText(self.ui.tabs.indexOf(self.ui.pasteTab), "لصق نص" if is_ar else "Paste Text")
+                except Exception:
+                    pass
+            # Q&A Send / Clear buttons
+            if hasattr(self.ui, 'sendQuestionButton'):
+                self.ui.sendQuestionButton.setText("إرسال" if is_ar else "Send")
+            if hasattr(self.ui, 'clearChatButton'):
+                self.ui.clearChatButton.setText("مسح" if is_ar else "Clear")
+            self._typing_label_base = "المساعد يكتب" if is_ar else "Assistant is typing"
+            self.ui.qaGroup.setTitle("دردشة الأسئلة والأجوبة" if is_ar else "Q&A Chat")
+            # Drop area label text
+            if hasattr(self.ui, 'dropArea'):
+                try:
+                    localized_drop = (
+                        "اسحب وأفلت هنا (PDF, DOCX, TXT, PNG, JPG) أو انقر لاختيار ملف"
+                        if is_ar else
+                        "Drag & Drop here (PDF, DOCX, TXT, PNG, JPG) OR click to choose a file"
+                    )
+                    if hasattr(self.ui.dropArea, '_default_label_text'):
+                        self.ui.dropArea._default_label_text = localized_drop
+                    if not self._get_selected_file_path() and hasattr(self.ui.dropArea, '_label'):
+                        self.ui.dropArea._label.setText(localized_drop)
+                except Exception:
+                    pass
+            # Refresh status with localized text
+            self._set_status(getattr(self, '_last_status_text', 'Ready'))
+        except Exception:
+            pass
+
+    def _start_background_analysis(self, params: dict):
+        self._set_loading(True)
+        thread = QThread(self)
+        worker = _AnalysisWorker(self, params)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_analysis_finished)
+        worker.error.connect(self._on_analysis_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        # Keep refs to prevent GC
+        self._analysis_thread = thread
+        self._analysis_worker = worker
+        thread.start()
+
+    @pyqtSlot(str, str, str, str)
+    def _on_analysis_finished(self, summary_text: str, status_text: str, notify_title: str, notify_message: str):
+        # Try to parse JSON and render a clean formatted HTML summary
+        parsed = self._try_parse_summary_json(summary_text or "")
+        if parsed is not None:
+            self._last_summary_json = parsed
+            html = self._format_json_summary_as_html(parsed)
+            text_for_context = self._format_json_summary_as_text(parsed)
+            try:
+                self.ui.summaryTextEdit.setHtml(html)
+            except Exception:
+                self.ui.summaryTextEdit.setPlainText(text_for_context)
+            self._last_summary_text = text_for_context
+        else:
+            self._last_summary_json = None
+            self.ui.summaryTextEdit.setPlainText(summary_text or "(No response)")
+            self._last_summary_text = summary_text or ""
+        # Enable Q&A chat now that we have a summary
+        # Context dropdown removed; Q&A enabled based only on presence of summary
+        self._set_qa_group_enabled(bool(self._last_summary_text.strip()))
+        if notify_title and notify_message:
+            self._maybe_notify(notify_title, notify_message)
+        if status_text:
+            self._set_status(status_text)
+        self._set_loading(False)
+
+    @pyqtSlot(str, str)
+    def _on_analysis_error(self, status_text: str, error_message: str):
+        if error_message:
+            QMessageBox.critical(self, "Analysis Error", error_message)
+        if status_text:
+            self._set_status(status_text)
+        self._set_loading(False)
 
     def open_settings(self):
+        # Guard against repeated clicks and keep UI responsive
+        if self._settings_open:
+            try:
+                self.settings_window.raise_()
+                self.settings_window.activateWindow()
+            except Exception:
+                pass
+            return
+        self._settings_open = True
+        self._set_settings_buttons_enabled(False)
         self.settings_window.show()
+        self.settings_window.finished.connect(self.on_settings_closed)
+
+    def on_settings_closed(self):
+        # Reload models if API keys changed
+        self.on_model_source_changed()
+        self._settings_open = False
+        self._set_settings_buttons_enabled(True)
+
+    def _set_settings_buttons_enabled(self, enabled: bool):
+        try:
+            if hasattr(self.ui, 'settingsButton'):
+                self.ui.settingsButton.setEnabled(enabled)
+            if hasattr(self.ui, 'topSettingsButton'):
+                self.ui.topSettingsButton.setEnabled(enabled)
+        except Exception:
+            pass
 
     def export_pdf(self):
+        text = self.ui.summaryTextEdit.toPlainText() if hasattr(self.ui, 'summaryTextEdit') else ""
+        if not text.strip():
+            QMessageBox.information(self, "Export", "There is no summary to export.")
+            return
+
         save_dialog = QFileDialog(self)
         save_dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
         save_dialog.setNameFilters(["PDF Files (*.pdf)"])
-        if save_dialog.exec():
-            save_path = save_dialog.selectedFiles()[0]
-            QMessageBox.information(self, "Export", f"Summary exported to:\n{save_path}")
+        save_dialog.selectFile("summary.pdf")
+        if not save_dialog.exec():
+            return
+        save_path = save_dialog.selectedFiles()[0]
+        if not save_path.lower().endswith(".pdf"):
+            save_path += ".pdf"
+        # Build final HTML in UI thread, then export in background thread
+        try:
+            widget_html = self.ui.summaryTextEdit.toHtml()
+        except Exception:
+            widget_html = ""
+
+        if widget_html:
+            inner = self._extract_body_inner_html(widget_html) or widget_html
+            final_html = self._build_export_html(inner)
+        else:
+            body = (
+                "<div style='white-space:pre-wrap; font-family:Times New Roman, serif; font-size:11pt;'>"
+                f"{self._escape_html(text)}"  # safe, escaped
+                "</div>"
+            )
+            final_html = self._build_export_html(body)
+
+        # Kick off background export
+        try:
+            if hasattr(self.ui, 'exportButton'):
+                self.ui.exportButton.setEnabled(False)
+        except Exception:
+            pass
+        self._set_status("Exporting PDF...")
+        self._start_background_export(final_html, save_path)
 
     def toggle_sidebar(self):
         # Animate sidebar open/close by changing maximumWidth
@@ -73,3 +706,889 @@ class MainWindow(QMainWindow):
             self.sidebar_animation.setEndValue(end_value)
             self.sidebar_animation.start()
             self.sidebar_visible = True
+
+    def _maybe_notify(self, title: str, message: str):
+        try:
+            if self.settings_window.notifications_enabled() and self.tray_icon:
+                self.tray_icon.showMessage(title, message, self.tray_icon.icon())
+        except Exception:
+            pass
+
+    # --- Model selection & detection ---
+    def on_model_source_changed(self):
+        # Kick off background refresh instead of blocking UI
+        self.refresh_models()
+
+    def refresh_models(self):
+        # Avoid overlapping refreshes
+        if self._is_refreshing:
+            return
+        self._is_refreshing = True
+        try:
+            if hasattr(self.ui, 'refreshModelsButton'):
+                self.ui.refreshModelsButton.setEnabled(False)
+            self._set_status("Refreshing models...")
+            self._begin_models_loading_ui()
+        except Exception:
+            pass
+
+        source = self.ui.modelSourceCombo.currentText() if hasattr(self.ui, 'modelSourceCombo') else ""
+        provider = "gemini" if source.startswith("Online") else ("ollama" if "Offline" in source else "")
+        params = {
+            "provider": provider,
+        }
+
+        thread = QThread(self)
+        worker = _RefreshWorker(self, params)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_refresh_finished)
+        worker.error.connect(self._on_refresh_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._refresh_thread = thread
+        self._refresh_worker = worker
+        thread.start()
+
+    @pyqtSlot(str, list, str)
+    def _on_refresh_finished(self, provider: str, items: list, message: str):
+        try:
+            if hasattr(self.ui, 'availableModelCombo'):
+                # Always clear the combo first to remove any "Loading models..." message
+                self.ui.availableModelCombo.clear()
+                if provider == "ollama":
+                    if items:
+                        self.ui.availableModelCombo.addItems(items)
+                    else:
+                        self.ui.availableModelCombo.addItem(message or "No models installed")
+                elif provider == "gemini":
+                    if items:
+                        self.ui.availableModelCombo.addItems(items)
+                    else:
+                        # Show informative message but leave combo enabled
+                        self.ui.availableModelCombo.addItem(message or "No Key Found")
+                # Always re-enable after loading completes, regardless of whether items were loaded
+                try:
+                    self.ui.availableModelCombo.setEnabled(True)
+                except Exception:
+                    pass
+        except Exception:
+            pass
+        finally:
+            self._is_refreshing = False
+            try:
+                if hasattr(self.ui, 'refreshModelsButton'):
+                    self.ui.refreshModelsButton.setEnabled(True)
+                self._set_status("Ready")
+            except Exception:
+                pass
+
+    @pyqtSlot(str)
+    def _on_refresh_error(self, error_message: str):
+        try:
+            if hasattr(self.ui, 'availableModelCombo'):
+                self.ui.availableModelCombo.clear()
+                self.ui.availableModelCombo.addItem("Failed to refresh models")
+                try:
+                    self.ui.availableModelCombo.setEnabled(True)
+                except Exception:
+                    pass
+            QMessageBox.critical(self, "Models", error_message)
+        except Exception:
+            pass
+        finally:
+            self._is_refreshing = False
+            try:
+                if hasattr(self.ui, 'refreshModelsButton'):
+                    self.ui.refreshModelsButton.setEnabled(True)
+                self._set_status("Ready")
+            except Exception:
+                pass
+
+    def _begin_models_loading_ui(self):
+        try:
+            if hasattr(self.ui, 'availableModelCombo'):
+                self.ui.availableModelCombo.clear()
+                self.ui.availableModelCombo.addItem("Loading models...")
+                self.ui.availableModelCombo.setEnabled(False)
+        except Exception:
+            pass
+
+    def _start_background_export(self, html: str, save_path: str):
+        thread = QThread(self)
+        worker = _ExportWorker(html, save_path)
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_export_finished)
+        worker.error.connect(self._on_export_error)
+        worker.finished.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        self._export_thread = thread
+        self._export_worker = worker
+        thread.start()
+
+    @pyqtSlot(str)
+    def _on_export_finished(self, save_path: str):
+        try:
+            QMessageBox.information(self, "Export", f"Summary exported to:\n{save_path}")
+        except Exception:
+            pass
+        try:
+            if hasattr(self.ui, 'exportButton'):
+                self.ui.exportButton.setEnabled(True)
+        except Exception:
+            pass
+        self._set_status("Ready")
+
+    @pyqtSlot(str)
+    def _on_export_error(self, error_message: str):
+        try:
+            QMessageBox.critical(self, "Export Error", f"Failed to export PDF:\n{error_message}")
+        except Exception:
+            pass
+        try:
+            if hasattr(self.ui, 'exportButton'):
+                self.ui.exportButton.setEnabled(True)
+        except Exception:
+            pass
+        self._set_status("Ready")
+
+    def _set_status(self, text: str):
+        self._last_status_text = text or getattr(self, '_last_status_text', 'Ready')
+        if hasattr(self.ui, 'statusbar'):
+            prefix = "الحالة" if getattr(self, '_current_lang', 'en') == 'ar' else "Status"
+            localized = self._translate_status_text(self._last_status_text)
+            self.ui.statusbar.showMessage(f"{prefix}: {localized}")
+
+    def _translate_status_text(self, text: str) -> str:
+        lang = getattr(self, '_current_lang', 'en')
+        if lang != 'ar':
+            return text
+        if not text:
+            return ""
+        mapping = {
+            "Ready": "جاهز",
+            "Refreshing models...": "تحديث النماذج...",
+            "Offline": "غير متصل",
+            "Online - Gemini": "متصل - Gemini",
+            "Offline - Done": "غير متصل - تم",
+            "Online - Gemini Done": "متصل - Gemini - تم",
+            "Ollama not available": "Ollama غير متاح",
+            "Ollama server is not running": "خادم Ollama غير قيد التشغيل",
+            "No models installed": "لا توجد نماذج مثبتة",
+            "Failed to refresh models": "فشل في تحديث النماذج",
+        }
+        if text in mapping:
+            return mapping[text]
+        if text.startswith("Offline - Running "):
+            return text.replace("Offline - Running ", "غير متصل - تشغيل ")
+        if text.startswith("Online - Gemini "):
+            return text.replace("Online - Gemini ", "متصل - Gemini ")
+        return text
+
+    def _get_analyze_button_text(self) -> str:
+        try:
+            is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+            return "تحليل المستند" if is_ar else "Analyze Document"
+        except Exception:
+            return "Analyze Document"
+
+    # --- Inputs & Extraction ---
+    def _get_input_text(self) -> str:
+        """Return pasted text only. Do not extract from file locally."""
+        pasted_text = self.ui.pasteTextEdit.toPlainText() if hasattr(self.ui, 'pasteTextEdit') else ""
+        return pasted_text.strip() if pasted_text and pasted_text.strip() else ""
+
+    def _get_selected_file_path(self) -> str:
+        return self._selected_file_path.strip()
+
+    def is_image_file(self, file_path: str) -> bool:
+        _, ext = os.path.splitext(file_path)
+        return (ext or "").lower() in {".png", ".jpg", ".jpeg"}
+
+    def _read_image_base64_and_mime(self, file_path: str) -> tuple[str, str]:
+        mime, _ = mimetypes.guess_type(file_path)
+        if not mime:
+            # Default to png if unknown
+            mime = "image/png"
+        with open(file_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+        return b64, mime
+
+    def extract_text_from_file(self, file_path: str) -> str:
+        """Extract text from PDF, DOCX, or TXT files. Raises on unsupported types."""
+        _, ext = os.path.splitext(file_path)
+        ext = (ext or "").lower()
+        if ext == ".pdf":
+            if PdfReader is None:
+                raise RuntimeError("PyPDF2 not installed. Please install 'PyPDF2'.")
+            text_parts = []
+            with open(file_path, "rb") as f:
+                reader = PdfReader(f)
+                for page in getattr(reader, "pages", []):
+                    try:
+                        text_parts.append(page.extract_text() or "")
+                    except Exception:
+                        continue
+            return "\n".join(part for part in text_parts if part)
+        if ext == ".docx":
+            if Document is None:
+                raise RuntimeError("python-docx not installed. Please install 'python-docx'.")
+            doc = Document(file_path)
+            return "\n".join(p.text for p in doc.paragraphs if p.text)
+        if ext == ".txt":
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                return f.read()
+        if ext == ".doc":
+            raise RuntimeError(".doc files are not supported. Please convert to .docx or PDF.")
+        raise RuntimeError(f"Unsupported file type: {ext}")
+
+    # --- Summarization Helpers ---
+    def summarize_text_offline(self, model: str, input_text: str) -> str:
+        schema = (
+            '{\n'
+            '  "summary": {\n'
+            '    "key_points": ["...", "..."],\n'
+            '    "methods": ["...", "..."],\n'
+            '    "conclusions": ["...", "..."]\n'
+            '  }\n'
+            '}'
+        )
+        is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+        if is_ar:
+            prompt = (
+                "أنت مُلخِّص أكاديمي خبير. يجب أن تُرجع الملخص بصيغة JSON صارمة فقط. "
+                "لخّص نص المستند المقدم فقط. ركّز على النقاط الرئيسية والأساليب والاستنتاجات. بدون أي تعليقات إضافية.\n\n"
+                f"نص المستند:\n{input_text}\n\n"
+                "أعد الملخص بهذا الهيكل JSON:\n"
+                f"{schema}\n\n"
+                "أرجع JSON صالح فقط دون أي أسطر برمجية أو نص خارج JSON. اكتب المحتوى باللغة العربية."
+            )
+        else:
+            prompt = (
+                "You are an expert academic summarizer. You must return the summary in strict JSON format. "
+                "Summarize only the provided document text. Focus on key points, methods, and conclusions. No extra commentary.\n\n"
+                f"Document text:\n{input_text}\n\n"
+                "Return the summary in this JSON structure:\n"
+                f"{schema}\n\n"
+                "Return only valid JSON. Do not include code fences or any text outside JSON. Write the content in English."
+            )
+        result = ollama_client.generate(model=model, prompt=prompt, format='json')
+        return result.get('response', '') if isinstance(result, dict) else str(result)
+
+    def summarize_image_offline(self, model: str, file_path: str) -> str:
+        b64, _ = self._read_image_base64_and_mime(file_path)
+        schema = (
+            '{\n'
+            '  "summary": {\n'
+            '    "key_points": ["...", "..."],\n'
+            '    "methods": ["...", "..."],\n'
+            '    "conclusions": ["...", "..."]\n'
+            '  }\n'
+            '}'
+        )
+        is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+        if is_ar:
+            prompt = (
+                "أنت مُلخِّص أكاديمي خبير. استخرج كل النص القابل للقراءة من الصورة المقدمة، "
+                "ثم لخّص ذلك النص فقط. يجب أن تُرجع الملخص بصيغة JSON صارمة. "
+                "ركّز على النقاط الرئيسية والأساليب والاستنتاجات. بدون أي تعليقات إضافية.\n\n"
+                "أعد الملخص بهذا الهيكل JSON:\n"
+                f"{schema}\n\n"
+                "أرجع JSON صالح فقط دون أي أسطر برمجية أو نص خارج JSON. اكتب المحتوى باللغة العربية."
+            )
+        else:
+            prompt = (
+                "You are an expert academic summarizer. Extract all legible text from the provided image, "
+                "then summarize only that extracted text. You must return the summary in strict JSON format. "
+                "Focus on key points, methods, and conclusions. No extra commentary.\n\n"
+                "Return the summary in this JSON structure:\n"
+                f"{schema}\n\n"
+                "Return only valid JSON. Do not include code fences or any text outside JSON. Write the content in English."
+            )
+        result = ollama_client.generate(model=model, prompt=prompt, images=[b64], format='json')
+        return result.get('response', '') if isinstance(result, dict) else str(result)
+
+    def summarize_text_gemini(self, model: str, input_text: str, api_key: str) -> Optional[str]:
+        genai.configure(api_key=api_key)  # type: ignore
+        is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+        if is_ar:
+            sys_instr = (
+                "أنت مُلخِّص أكاديمي خبير. يجب أن تُرجع الملخص بصيغة JSON صارمة فقط. "
+                "لخّص نص المستند المقدم فقط. ركّز على النقاط الرئيسية والأساليب والاستنتاجات. بدون أي تعليقات إضافية."
+            )
+            user_prompt = (
+                "نص المستند:\n" + input_text + "\n\n" +
+                "أعد الملخص بهذا الهيكل JSON:\n" +
+                '{\n  "summary": {\n    "key_points": ["...", "..."],\n    "methods": ["...", "..."],\n    "conclusions": ["...", "..."]\n  }\n}\n\n' +
+                "أرجع JSON صالح فقط بدون أسطر برمجية. اكتب المحتوى باللغة العربية."
+            )
+        else:
+            sys_instr = (
+                "You are an expert academic summarizer. You must return the summary in strict JSON format. "
+                "Summarize only the provided document text. Focus on key points, methods, and conclusions. No extra commentary."
+            )
+            user_prompt = (
+                "Document text:\n" + input_text + "\n\n" +
+                "Return the summary in this JSON structure:\n" +
+                '{\n  "summary": {\n    "key_points": ["...", "..."],\n    "methods": ["...", "..."],\n    "conclusions": ["...", "..."]\n  }\n}\n\n' +
+                "Return only valid JSON without code fences. Write the content in English."
+            )
+        m = genai.GenerativeModel(model_name=model, system_instruction=sys_instr)  # type: ignore
+        resp = m.generate_content([user_prompt])
+        return getattr(resp, 'text', None)
+
+    def summarize_image_gemini(self, model: str, file_path: str, api_key: str) -> Optional[str]:
+        genai.configure(api_key=api_key)  # type: ignore
+        is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+        if is_ar:
+            sys_instr = (
+                "أنت مُلخِّص أكاديمي خبير. يجب أن تُرجع الملخص بصيغة JSON صارمة فقط. "
+                "لخّص النص المستخرج من الصورة فقط. ركّز على النقاط الرئيسية والأساليب والاستنتاجات. بدون أي تعليقات إضافية."
+            )
+            user_prompt = (
+                "استخرج النص من هذه الصورة ولخّص النص المستخرج فقط.\n\n"
+                "أعد الملخص بهذا الهيكل JSON:\n"
+                '{\n  "summary": {\n    "key_points": ["...", "..."],\n    "methods": ["...", "..."],\n    "conclusions": ["...", "..."]\n  }\n}\n\n'
+                "أرجع JSON صالح فقط بدون أسطر برمجية. اكتب المحتوى باللغة العربية."
+            )
+        else:
+            sys_instr = (
+                "You are an expert academic summarizer. You must return the summary in strict JSON format. "
+                "Summarize only the provided document text extracted from the image. Focus on key points, methods, and conclusions. No extra commentary."
+            )
+            user_prompt = (
+                "Extract the text from this image and summarize only that extracted text.\n\n"
+                "Return the summary in this JSON structure:\n"
+                '{\n  "summary": {\n    "key_points": ["...", "..."],\n    "methods": ["...", "..."],\n    "conclusions": ["...", "..."]\n  }\n}\n\n'
+                "Return only valid JSON without code fences. Write the content in English."
+            )
+        m = genai.GenerativeModel(model_name=model, system_instruction=sys_instr)  # type: ignore
+        b64, mime = self._read_image_base64_and_mime(file_path)
+        image_part = {"mime_type": mime, "data": base64.b64decode(b64)}
+        resp = m.generate_content([user_prompt, image_part])
+        return getattr(resp, 'text', None)
+
+    # --- JSON parsing and formatting helpers ---
+    def _try_parse_summary_json(self, text: str):
+        if not text:
+            return None
+        # Direct parse
+        try:
+            return json.loads(text)
+        except Exception:
+            pass
+        # Strip code fences if present
+        fenced = text.strip()
+        if fenced.startswith("```)**"):
+            # unlikely, safety
+            fenced = fenced.strip('`')
+        if fenced.startswith("```") and fenced.endswith("```"):
+            inner = fenced.strip('`')
+            # Remove optional language tag
+            first_newline = inner.find("\n")
+            if first_newline != -1:
+                inner = inner[first_newline+1:]
+            try:
+                return json.loads(inner)
+            except Exception:
+                pass
+        # Extract first JSON object substring (robust brace matching)
+        try:
+            candidate = self._extract_first_json_object(text)
+            if candidate:
+                return json.loads(candidate)
+        except Exception:
+            pass
+        return None
+
+    def _extract_first_json_object(self, text: str) -> str:
+        try:
+            start = text.find('{')
+            if start == -1:
+                return ""
+            i = start
+            depth = 0
+            in_string = False
+            escape = False
+            while i < len(text):
+                ch = text[i]
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif ch == '\\':
+                        escape = True
+                    elif ch == '"':
+                        in_string = False
+                else:
+                    if ch == '"':
+                        in_string = True
+                    elif ch == '{':
+                        depth += 1
+                    elif ch == '}':
+                        depth -= 1
+                        if depth == 0:
+                            return text[start:i+1]
+                i += 1
+            return ""
+        except Exception:
+            return ""
+
+    def _format_json_summary_as_html(self, data: dict) -> str:
+        summary = data.get("summary", {}) if isinstance(data, dict) else {}
+        key_points = summary.get("key_points", []) if isinstance(summary, dict) else []
+        methods = summary.get("methods", []) if isinstance(summary, dict) else []
+        conclusions = summary.get("conclusions", []) if isinstance(summary, dict) else []
+        is_ar = getattr(self, "_current_lang", "en") == "ar"
+
+        # Localized section labels
+        label_key_points = "النقاط الرئيسية" if is_ar else "Key Points"
+        label_methods = "الأساليب" if is_ar else "Methods"
+        label_conclusions = "الاستنتاجات" if is_ar else "Conclusions"
+
+        def render_list(items):
+            if not isinstance(items, list) or not items:
+                return "<ul style='list-style-type:disc; padding-left:20px;'><li>—</li></ul>"
+            lis = "".join(f"<li>{self._escape_html(str(x))}</li>" for x in items)
+            return f"<ul style='list-style-type:disc; padding-left:20px; margin:6px 0;'>" + lis + "</ul>"
+
+        title_base = self._get_document_display_name()
+        title_text = self._get_localized_summary_title(title_base)
+        # Align title based on language: right for Arabic, left for English
+        title_align = "right" if is_ar else "left"
+        # Use Windows-common fonts: Tahoma for Arabic, Arial for English
+        title_font_family = "Tahoma" if is_ar else "Arial"
+        title_html = (
+            f"<h1 style='font-family:{title_font_family}; font-size:22pt; font-weight:bold; margin:0 0 12px 0; text-align:{title_align};'>"
+            f"{self._escape_html(title_text)}"
+            f"</h1>"
+        )
+
+        container_style = "font-family:Segoe UI, Arial, sans-serif; font-size:12pt; color:#111"
+        if is_ar:
+            container_style += "; direction:rtl; text-align:right"
+
+        html = (
+            f"<div style='{container_style}'>"
+            f"{title_html}"
+            f"<h3 style='margin:12px 0 6px 0;'>{self._escape_html(label_key_points)}</h3>"
+            f"{render_list(key_points)}"
+            f"<h3 style='margin:12px 0 6px 0;'>{self._escape_html(label_methods)}</h3>"
+            f"{render_list(methods)}"
+            f"<h3 style='margin:12px 0 6px 0;'>{self._escape_html(label_conclusions)}</h3>"
+            f"{render_list(conclusions)}"
+            "</div>"
+        )
+        return html
+
+    def _format_json_summary_as_text(self, data: dict) -> str:
+        summary = data.get("summary", {}) if isinstance(data, dict) else {}
+        key_points = summary.get("key_points", []) if isinstance(summary, dict) else []
+        methods = summary.get("methods", []) if isinstance(summary, dict) else []
+        conclusions = summary.get("conclusions", []) if isinstance(summary, dict) else []
+        is_ar = getattr(self, "_current_lang", "en") == "ar"
+
+        label_key_points = "النقاط الرئيسية" if is_ar else "Key Points"
+        label_methods = "الأساليب" if is_ar else "Methods"
+        label_conclusions = "الاستنتاجات" if is_ar else "Conclusions"
+
+        title_base = self._get_document_display_name()
+        title_text = self._get_localized_summary_title(title_base)
+        lines = [
+            f"{title_text}",
+            "",
+            f"{label_key_points}:",
+        ]
+        lines.extend([f"• {str(x)}" for x in key_points])
+        lines.extend(["", f"{label_methods}:"])
+        lines.extend([f"• {str(x)}" for x in methods])
+        lines.extend(["", f"{label_conclusions}:"])
+        lines.extend([f"• {str(x)}" for x in conclusions])
+        return "\n".join(lines)
+
+    def _get_document_display_name(self) -> str:
+        try:
+            path = getattr(self, "_selected_file_path", "") or ""
+            if path:
+                base = os.path.basename(path)
+                name, _ = os.path.splitext(base)
+                if name:
+                    return name
+                # fall through to localized default
+            # Localize fallback names
+            is_ar = getattr(self, "_current_lang", "en") == "ar"
+            return "نص ملصق" if is_ar else "Pasted Text"
+        except Exception:
+            return "مستند" if getattr(self, "_current_lang", "en") == "ar" else "Document"
+
+    def _get_localized_summary_title(self, base_name: str) -> str:
+        try:
+            is_ar = getattr(self, "_current_lang", "en") == "ar"
+            if is_ar:
+                # Arabic: "[File] تقرير ملخص المستند"
+                return f"تقرير ملخص المستند"
+            return f"Document Summary Report"
+        except Exception:
+            return f"Document Summary Report"
+
+    def _extract_body_inner_html(self, html: str) -> str:
+        try:
+            lower = html.lower()
+            start = lower.find("<body")
+            if start == -1:
+                return html
+            start = lower.find('>', start)
+            if start == -1:
+                return html
+            end = lower.rfind("</body>")
+            if end == -1:
+                end = len(html)
+            return html[start+1:end]
+        except Exception:
+            return html
+
+    def _build_export_html(self, body_inner_html: str) -> str:
+        try:
+            is_ar = getattr(self, "_current_lang", "en") == "ar"
+            dir_attr = " dir='rtl'" if is_ar else ""
+            style_base = "font-family:Times New Roman, serif; font-size:11pt; color:#111; min-height:100%;"
+            # Align H1 per language and enforce larger size/weight
+            h1_align = "right" if is_ar else "left"
+            page_style = (
+                f"@page {{ margin: 24mm 18mm 24mm 18mm; }} "
+                f"body {{ margin:0; padding:0; }} "
+                f"h1 {{ text-align:{h1_align}; font-size:22pt; font-weight:700; margin:0 0 12px 0; }}"
+            )
+            html = (
+                f"<html><head><meta charset='utf-8'><style>{page_style}</style></head>"
+                f"<body{dir_attr}><div style='{style_base}'>"
+                f"{body_inner_html}"
+                f"</div></body></html>"
+            )
+            return html
+        except Exception:
+            return body_inner_html
+
+    # --- Q&A Helpers ---
+    def answer_question_offline(self, model: str, messages, summary: str, input_text: str) -> str:
+        # Build system + user prompts per spec
+        is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+        if is_ar:
+            system_prompt = (
+                "أنت مساعد معرفي يساعد المستخدم في تحليل مستند محدد. \n"
+                "أجب عن الأسئلة بناءً فقط على محتوى المستند المعطى. \n"
+                "اجعل الإجابات موجزة وواقعية ودقيقة. اكتب الإجابة باللغة العربية."
+            )
+        else:
+            system_prompt = (
+                "You are a knowledgeable assistant helping a user analyze a specific document. \n"
+                "Answer questions only based on the given document content. \n"
+                "Keep answers concise, factual, and accurate."
+            )
+        # Prefer original input text if available; otherwise use summary
+        document_text = (input_text or "").strip() or (summary or "").strip()
+        # Extract the last user question from the messages
+        user_question = ""
+        for m in reversed(messages or []):
+            if m.get("role") == "user":
+                user_question = (m.get("content", "") or "").strip()
+                break
+        if is_ar:
+            user_prompt = (
+                "نص المستند:\n" + document_text + "\n\n" +
+                "سؤال المستخدم:\n" + user_question + "\n\n" +
+                "أجب بناءً على نص المستند فقط. اكتب الإجابة باللغة العربية."
+            )
+        else:
+            user_prompt = (
+                "Document text:\n" + document_text + "\n\n" +
+                "User Question:\n" + user_question + "\n\n" +
+                "Answer based strictly on the document text."
+            )
+        prompt = system_prompt + "\n\n" + user_prompt
+        result = ollama_client.generate(model=model, prompt=prompt)
+        return result.get('response', '') if isinstance(result, dict) else str(result)
+
+    def answer_question_gemini(self, model: str, messages, summary: str, input_text: str, api_key: str) -> Optional[str]:
+        genai.configure(api_key=api_key)  # type: ignore
+        is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+        if is_ar:
+            system_prompt = (
+                "أنت مساعد معرفي يساعد المستخدم في تحليل مستند محدد. \n"
+                "أجب عن الأسئلة بناءً فقط على محتوى المستند المعطى. \n"
+                "اجعل الإجابات موجزة وواقعية ودقيقة. اكتب الإجابة باللغة العربية."
+            )
+        else:
+            system_prompt = (
+                "You are a knowledgeable assistant helping a user analyze a specific document. \n"
+                "Answer questions only based on the given document content. \n"
+                "Keep answers concise, factual, and accurate."
+            )
+        m = genai.GenerativeModel(model_name=model, system_instruction=system_prompt)  # type: ignore
+        document_text = (input_text or "").strip() or (summary or "").strip()
+        user_question = ""
+        for mobj in reversed(messages or []):
+            if mobj.get("role") == "user":
+                user_question = (mobj.get("content", "") or "").strip()
+                break
+        if is_ar:
+            user_prompt = (
+                "نص المستند:\n" + document_text + "\n\n" +
+                "سؤال المستخدم:\n" + user_question + "\n\n" +
+                "أجب بناءً على نص المستند فقط. اكتب الإجابة باللغة العربية."
+            )
+        else:
+            user_prompt = (
+                "Document text:\n" + document_text + "\n\n" +
+                "User Question:\n" + user_question + "\n\n" +
+                "Answer based strictly on the document text."
+            )
+        resp = m.generate_content([user_prompt])
+        return getattr(resp, 'text', None)
+
+    def _read_config(self):
+        try:
+            # On first run, if appdata config missing but local config exists next to exe/cwd, copy it
+            try:
+                if not os.path.exists(self.config_path):
+                    local_cfg = os.path.join(os.getcwd(), "config.json")
+                    if os.path.exists(local_cfg):
+                        shutil.copy2(local_cfg, self.config_path)
+            except Exception:
+                pass
+            if os.path.exists(self.config_path):
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    return json.load(f)
+        except Exception:
+            pass
+        return {}
+
+    def _get_gemini_key(self) -> str:
+        data = self._read_config()
+        key = data.get("GOOGLE_API_KEY")
+        if key:
+            return key
+        # fallback to QSettings
+        return self.settings_window.settings.value("GOOGLE_API_KEY", "", type=str)
+
+    def is_ollama_available(self) -> bool:
+        return ollama_client is not None
+
+    def is_ollama_server_running(self) -> bool:
+        if not ollama_client:
+            return False
+        try:
+            # If the server is down, this will raise a connection error
+            _ = ollama_client.list()
+            return True
+        except Exception:
+            return False
+
+    def list_ollama_models(self) -> list:
+        if not ollama_client:
+            return []
+        try:
+            data = ollama_client.list()
+            # Support both dict responses and typed objects (ListResponse)
+            if isinstance(data, dict):
+                models = data.get('models', [])
+            else:
+                models = getattr(data, 'models', [])
+
+            names = []
+            for m in models:
+                if isinstance(m, dict):
+                    name = m.get('name') or m.get('model')
+                else:
+                    name = getattr(m, 'name', None) or getattr(m, 'model', None)
+                if name:
+                    names.append(name)
+            return names
+        except Exception:
+            return []
+
+    def populate_ollama_models(self):
+        if not hasattr(self.ui, 'availableModelCombo'):
+            return
+        self.ui.availableModelCombo.clear()
+        # Ensure the model combo is enabled for Offline source
+        try:
+            self.ui.availableModelCombo.setEnabled(True)
+        except Exception:
+            pass
+        if not self.is_ollama_available():
+            self.ui.availableModelCombo.addItem("Ollama not available")
+            return
+        if not self.is_ollama_server_running():
+            self.ui.availableModelCombo.addItem("Ollama server is not running")
+            return
+        names = self.list_ollama_models()
+        if names:
+            self.ui.availableModelCombo.addItems(names)
+        else:
+            self.ui.availableModelCombo.addItem("No models installed")
+
+    def populate_online_models(self, provider: str):
+        if not hasattr(self.ui, 'availableModelCombo'):
+            return
+        self.ui.availableModelCombo.clear()
+        if provider == "gemini":
+            key = self._get_gemini_key()
+            if not key:
+                # Show informative message inside the dropdown and disable it
+                self.ui.availableModelCombo.addItem("No Key Found")
+                return
+            try:
+                self.ui.availableModelCombo.setEnabled(True)
+            except Exception:
+                pass
+            self.ui.availableModelCombo.addItems(self.online_models_gemini)
+
+class _AnalysisWorker(QObject):
+    finished = pyqtSignal(str, str, str, str)  # summary, status, notify_title, notify_message
+    error = pyqtSignal(str, str)  # status, error_message
+
+    def __init__(self, window: 'MainWindow', params: dict):
+        super().__init__()
+        self.window = window
+        self.params = params
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            provider = self.params.get("provider")
+            model = self.params.get("model")
+            is_image = self.params.get("is_image")
+            file_path = self.params.get("file_path")
+            input_text = self.params.get("input_text")
+            gemini_key = self.params.get("gemini_key")
+
+            # Move potentially heavy file text extraction to the worker thread
+            try:
+                if file_path and not is_image and not (input_text or "").strip():
+                    if not os.path.exists(file_path):
+                        self.error.emit("", f"File does not exist:\n{file_path}")
+                        return
+                    extracted = self.window.extract_text_from_file(file_path)
+                    if not extracted:
+                        self.error.emit("", "Could not extract text from the selected file.")
+                        return
+                    input_text = extracted
+            except Exception as e:
+                self.error.emit("", f"Failed to extract text from file:\n{e}")
+                return
+
+            if provider == "ollama":
+                if is_image and file_path:
+                    summary = self.window.summarize_image_offline(model, file_path)
+                else:
+                    summary = self.window.summarize_text_offline(model, input_text)
+                self.finished.emit(summary or "(No response)", "Offline - Done", "Analysis Complete", "Your offline analysis has finished.")
+                return
+            if provider == "gemini":
+                if is_image and file_path:
+                    summary = self.window.summarize_image_gemini(model, file_path, gemini_key)
+                else:
+                    summary = self.window.summarize_text_gemini(model, input_text, gemini_key)
+                self.finished.emit(summary or "(No response)", "Online - Gemini Done", "Analysis Complete", "Your Gemini analysis has finished.")
+                return
+            self.error.emit("", "Unknown provider")
+        except Exception as e:
+            self.error.emit("", str(e))
+
+
+class _QAWorker(QObject):
+    finished = pyqtSignal(str)  # answer
+    error = pyqtSignal(str)  # error_message
+
+    def __init__(self, window: 'MainWindow', params: dict):
+        super().__init__()
+        self.window = window
+        self.params = params
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            provider = self.params.get("provider")
+            model = self.params.get("model")
+            messages = self.params.get("messages") or []
+            summary = self.params.get("summary")
+            input_text = self.params.get("input_text")
+            gemini_key = self.params.get("gemini_key")
+
+            if not model:
+                self.error.emit("No model selected for Q&A")
+                return
+            if provider == "ollama":
+                answer = self.window.answer_question_offline(model, messages, summary, input_text)
+                self.finished.emit(answer or "")
+                return
+            if provider == "gemini":
+                answer = self.window.answer_question_gemini(model, messages, summary, input_text, gemini_key)
+                self.finished.emit(answer or "")
+                return
+            self.error.emit("Unknown provider for Q&A")
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class _RefreshWorker(QObject):
+    finished = pyqtSignal(str, list, str)  # provider, items, message
+    error = pyqtSignal(str)  # error message
+
+    def __init__(self, window: 'MainWindow', params: dict):
+        super().__init__()
+        self.window = window
+        self.params = params
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            provider = self.params.get("provider")
+            if provider == "ollama":
+                # Distinguish between server-down vs no models installed
+                if not self.window.is_ollama_available():
+                    self.finished.emit("ollama", [], "Ollama not available")
+                    return
+                if not self.window.is_ollama_server_running():
+                    self.finished.emit("ollama", [], "Ollama server is not running")
+                    return
+                names = self.window.list_ollama_models()
+                msg = "No models installed" if not names else ""
+                self.finished.emit("ollama", names, msg)
+                return
+            if provider == "gemini":
+                key = self.window._get_gemini_key()
+                if not key:
+                    self.finished.emit("gemini", [], "No Key Found")
+                    return
+                self.finished.emit("gemini", list(self.window.online_models_gemini), "")
+                return
+            self.error.emit("Unknown provider")
+        except Exception as e:
+            self.error.emit(str(e))
+
+
+class _ExportWorker(QObject):
+    finished = pyqtSignal(str)  # save_path
+    error = pyqtSignal(str)  # error message
+
+    def __init__(self, html: str, save_path: str):
+        super().__init__()
+        self.html = html
+        self.save_path = save_path
+
+    @pyqtSlot()
+    def run(self):
+        try:
+            writer = QPdfWriter(self.save_path)
+            writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+            writer.setResolution(300)
+            doc = QTextDocument()
+            doc.setHtml(self.html)
+            doc.print(writer)
+            self.finished.emit(self.save_path)
+        except Exception as e:
+            self.error.emit(str(e))

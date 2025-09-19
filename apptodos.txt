@@ -1,0 +1,64 @@
+app hangs when lan is ar, so make the analyse and all buttons in seperate thread to not get (Not Response)
+have loader until the api response not receinved
+make every buton as thread so it not hangs
+
+
+
+
+
+
+
+
+IN LAST:
+have system notifications after analysis is complted
+add propoer ui color sheme
+add app proper app icons
+add about app info window
+automaticaly stwich to offline mode when no internet conected/no wifi
+remove / add chats from hostroy
+create new chat in chats history after succeful analysis summray is completed - prompt = when a new summary is generated for a new chat, it should create a new tab with respective file name(not full path) in the chat history and also all the histroy should be saved locally in pc and save whatever was done in that 
+
+
+gemini api key: 
+AIzaSyAaYVXMMgWYJk2_PqYMN6WeEIKusRAYdDs
+AIzaSyBBM711SktM0fy1iglRfU9HylxGLezrawU
+
+
+
+
+
+
+CLIENT REQUIREMTNS:
+
+
+These are the features we discussed till now. Anything beyond this will require additional time and budget:
+
+Windows desktop app – works offline after installation.
+Drag & drop or paste text from PDFs, DOCX, and images.
+Document summarization – highlight key points, methods, and conclusions.
+Summary output as PDF only.
+Editable summary pane – user can copy, tweak, or export.
+OCR support – extract text from uploaded images for summarization.
+Q&A feature – user can ask questions about the uploaded document in natural language 
+External LLM API integration – with a settings panel to manage API keys.
+Multilingual - Support English and Arabic Languages
+
+
+
+[12:44 am, 23/08/2025] Talha: I need a straightforward desktop tool that lets me drop a research-paper PDF or paste its text, press a button, and receive an overview-style summary that highlights the key points, methods, and conclusions. The focus is text summarization only—no sentiment analysis or topic modeling—so the interface and code can stay lean.
+
+I am open to your preferred tech stack as long as the final program runs smoothly on Windows and works offline once installed; calling an external LLM API for the heavy NLP lifting is perfectly fine if you wire in a clean settings panel for the API key. The summary should appear in an editable pane so I can copy, tweak, or export it.
+[12:44 am, 23/08/2025] Talha: i want is an offline app with no recurring cherges that can do scanning and processing
+[12:44 am, 23/08/2025] Talha: the app would support a PDF documents Docs but only output is a PDF so the summary is always a PDF.
+second We want the app to scan a picture for texts so ocr is needed
+[12:44 am, 23/08/2025] Talha: So the user will be able to upload the document either PDF or docs or any other kind even a picture and the system or the application will do a summary of the entire document it will give like points. What is the main idea? What is the intended of this document and what is the point of this document then it will ask the user to ask questions so basically Q&A so the user can ask how many time a word is mentioned and other like this
+[12:44 am, 23/08/2025] Talha: So
+Windows application accept documents:
+Scan it and provide summary
+Accept Q&A from the user
+Allow for OCR scan texts from pictures ok?
+
+
+
+
+
