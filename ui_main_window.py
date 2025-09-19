@@ -57,6 +57,8 @@ class DropArea(QtWidgets.QWidget):
         else:
             self._label.setText(self._default_label_text)
 
+    
+
     def mousePressEvent(self, event: QtGui.QMouseEvent):
         if event.button() == QtCore.Qt.MouseButton.LeftButton:
             try:
