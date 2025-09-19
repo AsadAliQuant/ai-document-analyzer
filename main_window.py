@@ -975,8 +975,17 @@ class MainWindow(QMainWindow):
                 f"{schema}\n\n"
                 "Return only valid JSON. Do not include code fences or any text outside JSON. Write the content in English."
             )
-        result = ollama_client.generate(model=model, prompt=prompt, format='json')
-        return result.get('response', '') if isinstance(result, dict) else str(result)
+        result = ollama_client.generate(model=model, prompt=prompt, format='json', stream=False)
+        if isinstance(result, dict):
+            return result.get('response', '') or ''
+        # Support typed responses from newer clients
+        try:
+            resp = getattr(result, 'response', '')
+            if resp:
+                return resp
+        except Exception:
+            pass
+        return str(result)
 
     def summarize_image_offline(self, model: str, file_path: str) -> str:
         b64, _ = self._read_image_base64_and_mime(file_path)
@@ -1008,8 +1017,17 @@ class MainWindow(QMainWindow):
                 f"{schema}\n\n"
                 "Return only valid JSON. Do not include code fences or any text outside JSON. Write the content in English."
             )
-        result = ollama_client.generate(model=model, prompt=prompt, images=[b64], format='json')
-        return result.get('response', '') if isinstance(result, dict) else str(result)
+        result = ollama_client.generate(model=model, prompt=prompt, images=[b64], format='json', stream=False)
+        if isinstance(result, dict):
+            return result.get('response', '') or ''
+        # Support typed responses from newer clients
+        try:
+            resp = getattr(result, 'response', '')
+            if resp:
+                return resp
+        except Exception:
+            pass
+        return str(result)
 
     def summarize_text_gemini(self, model: str, input_text: str, api_key: str) -> Optional[str]:
         genai.configure(api_key=api_key)  # type: ignore
@@ -1308,8 +1326,16 @@ class MainWindow(QMainWindow):
                 "Answer based strictly on the document text."
             )
         prompt = system_prompt + "\n\n" + user_prompt
-        result = ollama_client.generate(model=model, prompt=prompt)
-        return result.get('response', '') if isinstance(result, dict) else str(result)
+        result = ollama_client.generate(model=model, prompt=prompt, stream=False)
+        if isinstance(result, dict):
+            return result.get('response', '') or ''
+        try:
+            resp = getattr(result, 'response', '')
+            if resp:
+                return resp
+        except Exception:
+            pass
+        return str(result)
 
     def answer_question_gemini(self, model: str, messages, summary: str, input_text: str, api_key: str) -> Optional[str]:
         genai.configure(api_key=api_key)  # type: ignore
