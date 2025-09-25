@@ -45,6 +45,7 @@ class DropArea(QtWidgets.QWidget):
         # Hide the internal button; the whole area is clickable
         self._browseButton.setVisible(False)
         self._content.addStretch(1)
+
         self._update_style()
 
     def sizeHint(self) -> QtCore.QSize:  # type: ignore[override]
@@ -74,6 +75,7 @@ class DropArea(QtWidgets.QWidget):
             except Exception:
                 pass
         super().mouseDoubleClickEvent(event)
+
 
     def _update_style(self):
         bg = "#fff8f2" if self._is_drag_over else "#fdffffff"

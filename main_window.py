@@ -1,6 +1,6 @@
 from PyQt6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QSystemTrayIcon, QGroupBox, QVBoxLayout, QHBoxLayout, QTextBrowser, QLineEdit, QPushButton, QWidget, QComboBox, QLabel, QApplication, QGraphicsOpacityEffect
-from PyQt6.QtCore import QPropertyAnimation, QEasingCurve, QThread, QObject, pyqtSignal, pyqtSlot, QTimer
-from PyQt6.QtGui import QIcon, QPdfWriter, QPageSize, QTextDocument, QFont
+from PyQt6.QtCore import QPropertyAnimation, QEasingCurve, QThread, QObject, pyqtSignal, pyqtSlot, QTimer, Qt, QRect, QRectF, QMarginsF
+from PyQt6.QtGui import QIcon, QPdfWriter, QPageSize, QTextDocument, QFont, QPainter, QImage
 import json
 import re
 import os
@@ -153,6 +153,7 @@ class MainWindow(QMainWindow):
         # --- Q&A Chat UI (below Export button) ---
         self._last_summary_text: str = ""
         self._last_input_text_for_qa: str = ""
+        self._qa_document_text: str = ""
         self._qa_thread = None
         self._qa_worker = None
         self._qa_messages = []  # list of {role: 'user'|'assistant', content: str}
@@ -185,6 +186,13 @@ class MainWindow(QMainWindow):
         qa_controls_layout.addWidget(self.ui.sendQuestionButton)
         qa_controls_layout.addWidget(self.ui.clearChatButton)
         qa_group_layout.addWidget(qa_controls)
+
+        # Image to PDF button (hidden by default, shown only if selected file is an image)
+        self.ui.saveImageAsPdfButton = QPushButton("Save IMAGE as PDF")
+        self.ui.saveImageAsPdfButton.setVisible(False)
+        self.ui.saveImageAsPdfButton.clicked.connect(self._save_image_as_pdf)
+        if hasattr(self.ui, 'rightLayout'):
+            self.ui.rightLayout.addWidget(self.ui.saveImageAsPdfButton)
 
         # Insert just below the Export button in the right panel
         if hasattr(self.ui, 'rightLayout'):
@@ -263,6 +271,12 @@ class MainWindow(QMainWindow):
                     self.ui.dropArea.setSelectedFileName(selected_file)
                 except Exception:
                     pass
+            # Toggle image-to-PDF button visibility based on file type
+            try:
+                if hasattr(self.ui, 'saveImageAsPdfButton'):
+                    self.ui.saveImageAsPdfButton.setVisible(self.is_image_file(selected_file))
+            except Exception:
+                pass
 
     @pyqtSlot(str)
     def _on_file_dropped(self, file_path: str):
@@ -274,6 +288,14 @@ class MainWindow(QMainWindow):
                 self.ui.dropArea.setSelectedFileName(file_path)
             except Exception:
                 pass
+        # Toggle image-to-PDF button visibility based on file type
+        try:
+            if hasattr(self.ui, 'saveImageAsPdfButton'):
+                self.ui.saveImageAsPdfButton.setVisible(self.is_image_file(file_path))
+        except Exception:
+            pass
+
+    # Removed clear-file handler (feature reverted)
 
     def analyze_document(self):
         source = self.ui.modelSourceCombo.currentText() if hasattr(self.ui, 'modelSourceCombo') else ""
@@ -329,6 +351,7 @@ class MainWindow(QMainWindow):
 
         # Reset and prepare Q&A chat state
         self._last_input_text_for_qa = input_text or ""
+        self._qa_document_text = ""  # will be populated after extraction in worker
         self._last_summary_text = ""
         self._clear_chat()
         self._qa_messages = []
@@ -449,8 +472,8 @@ class MainWindow(QMainWindow):
         self._set_qa_controls_enabled(False)
         self._start_qa_typing_indicator()
 
-        # Context dropdown removed; default to using summary only
-        include_input = False
+        # Use full original document text (extracted or pasted) by default
+        include_input = True
         provider = self.ui.modelSourceCombo.currentText() if hasattr(self.ui, 'modelSourceCombo') else ""
         model = self.ui.availableModelCombo.currentText() if hasattr(self.ui, 'availableModelCombo') else ""
         params = {
@@ -458,7 +481,7 @@ class MainWindow(QMainWindow):
             "model": model,
             "messages": list(self._qa_messages),
             "summary": self._last_summary_text,
-            "input_text": self._last_input_text_for_qa if include_input else "",
+            "input_text": (self._qa_document_text or self._last_input_text_for_qa) if include_input else "",
             "gemini_key": self._get_gemini_key() if "Gemini" in provider else "",
         }
 
@@ -686,6 +709,59 @@ class MainWindow(QMainWindow):
             pass
         self._set_status("Exporting PDF...")
         self._start_background_export(final_html, save_path)
+
+    def _save_image_as_pdf(self):
+        path = self._get_selected_file_path()
+        if not path or not self.is_image_file(path):
+            QMessageBox.information(self, "Image", "Please select an image file (PNG/JPG/JPEG) first.")
+            return
+        # Ask for save path
+        save_dialog = QFileDialog(self)
+        save_dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+        save_dialog.setNameFilters(["PDF Files (*.pdf)"])
+        save_dialog.selectFile("image.pdf")
+        if not save_dialog.exec():
+            return
+        save_path = save_dialog.selectedFiles()[0]
+        if not save_path.lower().endswith(".pdf"):
+            save_path += ".pdf"
+        try:
+            image = QImage(path)
+            if image.isNull():
+                QMessageBox.critical(self, "Image", "Failed to read the selected image.")
+                return
+            writer = QPdfWriter(save_path)
+            writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
+            writer.setResolution(300)
+            # Remove margins to use full page for centering
+            try:
+                layout = writer.pageLayout()
+                layout.setMargins(QMarginsF(0, 0, 0, 0))
+                writer.setPageLayout(layout)
+            except Exception:
+                pass
+            painter = QPainter(writer)
+            # Use the full page rectangle in device pixels
+            full_rect = writer.pageLayout().fullRectPixels(writer.resolution())
+            page_w = float(full_rect.width())
+            page_h = float(full_rect.height())
+            img_w = image.width()
+            img_h = image.height()
+            if img_w == 0 or img_h == 0:
+                painter.end()
+                QMessageBox.critical(self, "Image", "Invalid image dimensions.")
+                return
+            scale = min(page_w / float(img_w), page_h / float(img_h))
+            target_w = float(img_w) * scale
+            target_h = float(img_h) * scale
+            x = float(full_rect.x()) + (page_w - target_w) / 2.0
+            y = float(full_rect.y()) + (page_h - target_h) / 2.0
+            dest_rect = QRectF(x, y, target_w, target_h)
+            painter.drawImage(dest_rect, image)
+            painter.end()
+            QMessageBox.information(self, "Image", f"Saved PDF to:\n{save_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "Image to PDF", f"Failed to save PDF:\n{e}")
 
     def toggle_sidebar(self):
         # Animate sidebar open/close by changing maximumWidth
@@ -1098,6 +1174,16 @@ class MainWindow(QMainWindow):
             return json.loads(text)
         except Exception:
             pass
+        # Normalize common formatting artifacts and try again
+        try:
+            normalized = self._normalize_json_like(text)
+            if normalized and normalized != text:
+                try:
+                    return json.loads(normalized)
+                except Exception:
+                    pass
+        except Exception:
+            pass
         # Strip code fences if present
         fenced = text.strip()
         if fenced.startswith("```)**"):
@@ -1117,10 +1203,43 @@ class MainWindow(QMainWindow):
         try:
             candidate = self._extract_first_json_object(text)
             if candidate:
-                return json.loads(candidate)
+                try:
+                    return json.loads(candidate)
+                except Exception:
+                    # Try normalized candidate
+                    normalized_candidate = self._normalize_json_like(candidate)
+                    if normalized_candidate:
+                        return json.loads(normalized_candidate)
         except Exception:
             pass
         return None
+
+    def _normalize_json_like(self, text: str) -> str:
+        try:
+            s = text or ""
+            # Remove BOM and zero-width characters
+            s = s.replace("\ufeff", "").replace("\u200b", "")
+            # Replace smart quotes with straight quotes
+            s = s.replace("\u201c", '"').replace("\u201d", '"')
+            s = s.replace("\u2018", "'").replace("\u2019", "'")
+            # Remove fenced code blocks generically
+            stripped = s.strip()
+            if stripped.startswith("```)**"):
+                stripped = stripped.strip('`')
+            if stripped.startswith("```") and stripped.endswith("```"):
+                inner = stripped.strip('`')
+                nl = inner.find("\n")
+                if nl != -1:
+                    inner = inner[nl+1:]
+                s = inner
+            # Remove trailing commas before object/array close
+            try:
+                s = re.sub(r",\s*([}\]])", r"\\1", s)
+            except Exception:
+                pass
+            return s
+        except Exception:
+            return text
 
     def _extract_first_json_object(self, text: str) -> str:
         try:
@@ -1288,25 +1407,24 @@ class MainWindow(QMainWindow):
             return html
         except Exception:
             return body_inner_html
-
     # --- Q&A Helpers ---
     def answer_question_offline(self, model: str, messages, summary: str, input_text: str) -> str:
-        # Build system + user prompts per spec
+        # Build system + user prompts with robust instructions for safety flags, counts, and dialogue
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         if is_ar:
             system_prompt = (
-                "أنت مساعد معرفي يساعد المستخدم في تحليل مستند محدد. \n"
-                "أجب عن الأسئلة بناءً فقط على محتوى المستند المعطى. \n"
-                "اجعل الإجابات موجزة وواقعية ودقيقة. اكتب الإجابة باللغة العربية."
+                "أنت مساعد ذكاء اصطناعي يقوم بتحليل مستند واحد مُقدَّم (نص عادي أو ملف PDF أو غيره) ويجيب فقط عن الأسئلة المتعلقة بمحتواه. "
+                "تعامل مع جميع أنواع الأسئلة مثل: هل فيه أي عنف في المستند؟، كم مرة انذكرت كلمة “___”؟، عن إيش يتكلم الحوار بين “الشخصية” و”الشخصية”؟، هل فيه كلام مسيء للقانون أو للوطن؟، هل فيه استهداف لقبيلة بكلام مباشر أو غير مباشر؟."
             )
         else:
             system_prompt = (
-                "You are a knowledgeable assistant helping a user analyze a specific document. \n"
-                "Answer questions only based on the given document content. \n"
-                "Keep answers concise, factual, and accurate."
+                "You are an AI assistant that analyzes a single provided document (plain text, PDF, etc.) and answers only questions about its content. "
+                "Handle all types of questions such as: “Does the document include any form of violence?”, “How many times was the ‘word’ repeated?”, “What is the conversation about between ‘character A’ and ‘character B’?”, “Does the document include offensive ideas or words against the law or the country?”, and “Does it contain words targeting a tribe?”."
             )
-        # Prefer original input text if available; otherwise use summary
-        document_text = (input_text or "").strip() or (summary or "").strip()
+        # Strictly use original document text only (no summary fallback)
+        document_text = (input_text or "").strip()
+        if not document_text:
+            return "لا يوجد نص مستند متاح للأسئلة والأجوبة." if is_ar else "No document text available for Q&A."
         # Extract the last user question from the messages
         user_question = ""
         for m in reversed(messages or []):
@@ -1317,13 +1435,13 @@ class MainWindow(QMainWindow):
             user_prompt = (
                 "نص المستند:\n" + document_text + "\n\n" +
                 "سؤال المستخدم:\n" + user_question + "\n\n" +
-                "أجب بناءً على نص المستند فقط. اكتب الإجابة باللغة العربية."
+                "أجب بالعربية اعتمادًا فقط على نص المستند. لا تضف معلومات خارجية."
             )
         else:
             user_prompt = (
                 "Document text:\n" + document_text + "\n\n" +
                 "User Question:\n" + user_question + "\n\n" +
-                "Answer based strictly on the document text."
+                "Answer strictly based on the document text only."
             )
         prompt = system_prompt + "\n\n" + user_prompt
         result = ollama_client.generate(model=model, prompt=prompt, stream=False)
@@ -1342,18 +1460,19 @@ class MainWindow(QMainWindow):
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         if is_ar:
             system_prompt = (
-                "أنت مساعد معرفي يساعد المستخدم في تحليل مستند محدد. \n"
-                "أجب عن الأسئلة بناءً فقط على محتوى المستند المعطى. \n"
-                "اجعل الإجابات موجزة وواقعية ودقيقة. اكتب الإجابة باللغة العربية."
+                "أنت مساعد ذكاء اصطناعي يقوم بتحليل مستند واحد مُقدَّم (نص عادي أو ملف PDF أو غيره) ويجيب فقط عن الأسئلة المتعلقة بمحتواه. "
+                "تعامل مع جميع أنواع الأسئلة مثل: هل فيه أي عنف في المستند؟، كم مرة انذكرت كلمة “___”؟، عن إيش يتكلم الحوار بين “الشخصية” و”الشخصية”؟، هل فيه كلام مسيء للقانون أو للوطن؟، هل فيه استهداف لقبيلة بكلام مباشر أو غير مباشر؟."
             )
         else:
             system_prompt = (
-                "You are a knowledgeable assistant helping a user analyze a specific document. \n"
-                "Answer questions only based on the given document content. \n"
-                "Keep answers concise, factual, and accurate."
+                "You are an AI assistant that analyzes a single provided document (plain text, PDF, etc.) and answers only questions about its content. "
+                "Handle all types of questions such as: “Does the document include any form of violence?”, “How many times was the ‘word’ repeated?”, “What is the conversation about between ‘character A’ and ‘character B’?”, “Does the document include offensive ideas or words against the law or the country?”, and “Does it contain words targeting a tribe?”."
             )
         m = genai.GenerativeModel(model_name=model, system_instruction=system_prompt)  # type: ignore
-        document_text = (input_text or "").strip() or (summary or "").strip()
+        # Strictly use original document text only (no summary fallback)
+        document_text = (input_text or "").strip()
+        if not document_text:
+            return "لا يوجد نص مستند متاح للأسئلة والأجوبة." if is_ar else "No document text available for Q&A."
         user_question = ""
         for mobj in reversed(messages or []):
             if mobj.get("role") == "user":
@@ -1363,13 +1482,13 @@ class MainWindow(QMainWindow):
             user_prompt = (
                 "نص المستند:\n" + document_text + "\n\n" +
                 "سؤال المستخدم:\n" + user_question + "\n\n" +
-                "أجب بناءً على نص المستند فقط. اكتب الإجابة باللغة العربية."
+                "أجب بالعربية اعتمادًا فقط على نص المستند. لا تضف معلومات خارجية."
             )
         else:
             user_prompt = (
                 "Document text:\n" + document_text + "\n\n" +
                 "User Question:\n" + user_question + "\n\n" +
-                "Answer based strictly on the document text."
+                "Answer strictly based on the document text only."
             )
         resp = m.generate_content([user_prompt])
         return getattr(resp, 'text', None)
@@ -1505,6 +1624,17 @@ class _AnalysisWorker(QObject):
             except Exception as e:
                 self.error.emit("", f"Failed to extract text from file:\n{e}")
                 return
+
+            # Persist the effective document text for Q&A usage
+            try:
+                effective_text = (input_text or "").strip()
+                if not effective_text and is_image and file_path:
+                    # For images, we do not OCR locally; rely on model context
+                    # Leave empty so Q&A will fallback to summary
+                    effective_text = ""
+                self.window._qa_document_text = effective_text
+            except Exception:
+                pass
 
             if provider == "ollama":
                 if is_image and file_path:
