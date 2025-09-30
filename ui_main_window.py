@@ -190,8 +190,6 @@ class Ui_MainWindow(object):
         self.topBarLayout.addStretch(1)
         self.topBarLayout.addWidget(self.topSettingsButton)
         self.leftLayout.addWidget(self.topBar)
-
-        # Tabs: Upload / Paste
         self.tabs = QtWidgets.QTabWidget(self.leftPanel)
         self.uploadTab = QtWidgets.QWidget()
         self.pasteTab = QtWidgets.QWidget()
@@ -278,12 +276,10 @@ class Ui_MainWindow(object):
         MainWindow.setWindowTitle(_translate("AI Document Analyzer", "AI Document Analyzer"))
         self.toggleSidebarButton.setText(_translate("AI Document Analyzer", "☰"))
         self.newChatButton.setText(_translate("AI Document Analyzer", "＋ New Analysis"))
-        self.settingsButton.setText(_translate("AI Document Analyzer", "⚙ Settings"))
+        self.topSettingsButton.setText(_translate("AI Document Analyzer", "Settings"))
         self.modelSourceLabel.setText(_translate("AI Document Analyzer", "Source:"))
         self.availableModelLabel.setText(_translate("AI Document Analyzer", "Model:"))
         self.refreshModelsButton.setText(_translate("AI Document Analyzer", "Refresh"))
-        self.topSettingsButton.setText(_translate("AI Document Analyzer", "Settings"))
-        self.tabs.setTabText(self.tabs.indexOf(self.uploadTab), _translate("AI Document Analyzer", "Upload Document"))
         self.tabs.setTabText(self.tabs.indexOf(self.pasteTab), _translate("AI Document Analyzer", "Paste Text"))
         self.analyzeButton.setText(_translate("AI Document Analyzer", "Analyze Document"))
         self.copySummaryButton.setText(_translate("AI Document Analyzer", "Copy Summary"))

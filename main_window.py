@@ -5,12 +5,14 @@ import json
 import re
 import os
 import shutil
+import math
 from ui_main_window import Ui_MainWindow
 from settings_window import SettingsWindow
-from typing import Optional
+from typing import Optional, List
 import base64
 import mimetypes
 import locale
+from large_doc_manager import LargeDocumentManager
 
 # Optional imports for file text extraction
 try:
@@ -121,23 +123,23 @@ class MainWindow(QMainWindow):
         self.config_path = os.path.join(self.app_config_dir, "config.json")
         # Initialize language to English by default (no persistence)
         self.apply_language("en")
+        self.large_doc_manager = LargeDocumentManager(self.app_config_dir)
+        self._qa_vector_doc_key: str = ""
+        self._pending_analysis_params: Optional[dict] = None
+        self._processing_thread: Optional[QThread] = None
+        self._processing_worker: Optional['LargeDocProcessWorker'] = None
         self.online_models_gemini = [
             "gemini-2.5-flash",
         ]
         if hasattr(self.ui, 'modelSourceCombo'):
             self.ui.modelSourceCombo.clear()
             self.ui.modelSourceCombo.addItems(["Online (Google Gemini)", "Offline (Ollama LLaMA)"])
-            # Always set Gemini as default (index 0 - first)
             self.ui.modelSourceCombo.setCurrentIndex(0)
             self.ui.modelSourceCombo.setEnabled(True)
             self.ui.modelSourceCombo.currentIndexChanged.connect(self.on_model_source_changed)
         if hasattr(self.ui, 'availableModelCombo'):
             self.ui.availableModelCombo.clear()
         self.on_model_source_changed()
-
-        # Status bar initial state
-        if hasattr(self.ui, 'statusbar'):
-            self._set_status("Ready")
 
         # Analyze button loader state
         self._analyze_loader_timer = QTimer(self)
@@ -154,6 +156,7 @@ class MainWindow(QMainWindow):
         self._last_summary_text: str = ""
         self._last_input_text_for_qa: str = ""
         self._qa_document_text: str = ""
+        self._current_doc_key: str = ""
         self._qa_thread = None
         self._qa_worker = None
         self._qa_messages = []  # list of {role: 'user'|'assistant', content: str}
@@ -319,6 +322,10 @@ class MainWindow(QMainWindow):
             if not model or model.startswith("Ollama not") or model.startswith("No models") or model.startswith("Ollama server"):
                 QMessageBox.information(self, "Ollama", "No valid local model selected.")
                 return
+            # Check if selected model is not an embedding model
+            if model.startswith("nomic-embed-text"):
+                QMessageBox.warning(self, "Invalid Model", "Please select a chat model for summarization, not an embedding model.")
+                return
             self._set_status(f"Offline - Running {model}...")
         elif "Gemini" in source:
             provider = "gemini"
@@ -348,6 +355,35 @@ class MainWindow(QMainWindow):
             "input_text": input_text,
             "gemini_key": self._get_gemini_key() if provider == "gemini" else "",
         }
+
+        doc_key = ""
+        if file_path and not is_image:
+            try:
+                doc_key = self.large_doc_manager.compute_document_key(file_path)
+            except Exception:
+                doc_key = ""
+            params["doc_key"] = doc_key
+        else:
+            params["doc_key"] = ""
+
+        if file_path and not is_image and doc_key:
+            if self._is_large_document(file_path):
+                self._current_doc_key = doc_key
+                has_store = bool(doc_key and self.large_doc_manager.has_vector_store(doc_key))
+                if not has_store:
+                    if not self._prompt_large_doc_processing():
+                        return
+                    self._pending_analysis_params = params
+                    self._set_status("Processing document...")
+                    self._set_loading(True)
+                    print("Starting large doc processing worker")
+                    self._start_large_doc_processing(file_path, doc_key)
+                    return
+                self._qa_vector_doc_key = doc_key
+            else:
+                self._qa_vector_doc_key = ""
+        else:
+            self._qa_vector_doc_key = ""
 
         # Reset and prepare Q&A chat state
         self._last_input_text_for_qa = input_text or ""
@@ -458,6 +494,89 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
 
+    def _is_large_document(self, file_path: str) -> bool:
+        """Check if document is large (more than 2 pages for PDF, or similar logic)."""
+        try:
+            _, ext = os.path.splitext(file_path)
+            ext = (ext or "").lower()
+            if ext == ".pdf":
+                if PdfReader is None:
+                    return False
+                with open(file_path, "rb") as f:
+                    reader = PdfReader(f)
+                    return len(reader.pages) > 2
+            elif ext == ".docx":
+                if Document is None:
+                    return False
+                doc = Document(file_path)
+                text = "\n".join(p.text for p in doc.paragraphs if p.text)
+                # Approximate pages based on character count (rough estimate)
+                return len(text) > 5000
+            elif ext == ".txt":
+                with open(file_path, "r", encoding="utf-8", errors="ignore") as f:
+                    text = f.read()
+                return len(text) > 5000
+        except Exception:
+            pass
+        return False
+
+    def _prompt_large_doc_processing(self) -> bool:
+        """Prompt user to confirm large document processing."""
+        is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+        title = "معالجة مستند كبير" if is_ar else "Large Document Processing"
+        message = (
+            "هذا المستند كبير جداً. هل تريد تقسيمه إلى قطع وتخزينه في قاعدة بيانات المتجهات للمعالجة الأفضل؟\n\n"
+            "سيتم إنشاء تقرير الملخص من هذه القطع."
+            if is_ar else
+            "This document is large. Would you like to split it into chunks and store in a vector database for better processing?\n\n"
+            "The summary report will be created from these chunks."
+        )
+        reply = QMessageBox.question(
+            self, title, message,
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes
+        )
+        return reply == QMessageBox.StandardButton.Yes
+
+    def _start_large_doc_processing(self, file_path: str, doc_key: str):
+        """Start background processing for large documents."""
+        self._processing_thread = QThread(self)
+        self._processing_worker = LargeDocProcessWorker(self, file_path, doc_key)
+        self._processing_worker.moveToThread(self._processing_thread)
+        self._processing_thread.started.connect(self._processing_worker.run)
+        self._processing_worker.finished.connect(self._on_large_doc_processing_finished)
+        self._processing_worker.error.connect(self._on_large_doc_processing_error)
+        self._processing_worker.finished.connect(self._processing_thread.quit)
+        self._processing_worker.finished.connect(self._processing_worker.deleteLater)
+        self._processing_thread.finished.connect(self._processing_thread.deleteLater)
+        self._processing_thread.start()
+
+    @pyqtSlot(str, int)
+    def _on_large_doc_processing_finished(self, doc_key: str, chunk_count: int):
+        """Handle successful large document processing."""
+        self._set_loading(False)
+        is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+        message = (
+            f"تم تقسيم المستند إلى {chunk_count} قطعة وتخزينها في قاعدة البيانات.\n\nجاري إنشاء التقرير..."
+            if is_ar else
+            f"Document split into {chunk_count} chunks and stored in database.\n\nGenerating report..."
+        )
+        self._set_status(message)
+        # Now proceed with analysis using the vector context
+        if self._pending_analysis_params:
+            self._pending_analysis_params["doc_key"] = doc_key
+            self._qa_vector_doc_key = doc_key
+            self._start_background_analysis(self._pending_analysis_params)
+            self._pending_analysis_params = None
+
+    @pyqtSlot(str)
+    def _on_large_doc_processing_error(self, error_message: str):
+        """Handle large document processing error."""
+        self._set_loading(False)
+        self._pending_analysis_params = None
+        QMessageBox.critical(self, "Processing Error", f"Failed to process large document:\n{error_message}")
+        self._set_status("Ready")
+
     def _send_question(self):
         question = self.ui.questionLineEdit.text().strip()
         if not question:
@@ -466,16 +585,20 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "Q&A", "Please generate a summary first.")
             return
 
+        # Use full original document text (extracted or pasted) by default
+        include_input = True
+        provider = self.ui.modelSourceCombo.currentText() if hasattr(self.ui, 'modelSourceCombo') else ""
+        model = self.ui.availableModelCombo.currentText() if hasattr(self.ui, 'availableModelCombo') else ""
+        # Check if selected model is valid for Q&A
+        if provider.startswith("Offline") and model.startswith("nomic-embed-text"):
+            QMessageBox.warning(self, "Invalid Model", "Please select a chat model for Q&A, not an embedding model.")
+            return
+
         self._append_chat("You", question)
         self._append_history("user", question)
         self.ui.questionLineEdit.clear()
         self._set_qa_controls_enabled(False)
         self._start_qa_typing_indicator()
-
-        # Use full original document text (extracted or pasted) by default
-        include_input = True
-        provider = self.ui.modelSourceCombo.currentText() if hasattr(self.ui, 'modelSourceCombo') else ""
-        model = self.ui.availableModelCombo.currentText() if hasattr(self.ui, 'availableModelCombo') else ""
         params = {
             "provider": "ollama" if provider.startswith("Offline") else ("gemini" if "Gemini" in provider else ""),
             "model": model,
@@ -483,6 +606,7 @@ class MainWindow(QMainWindow):
             "summary": self._last_summary_text,
             "input_text": (self._qa_document_text or self._last_input_text_for_qa) if include_input else "",
             "gemini_key": self._get_gemini_key() if "Gemini" in provider else "",
+            "doc_key": self._qa_vector_doc_key,
         }
 
         thread = QThread(self)
@@ -1408,7 +1532,7 @@ class MainWindow(QMainWindow):
         except Exception:
             return body_inner_html
     # --- Q&A Helpers ---
-    def answer_question_offline(self, model: str, messages, summary: str, input_text: str) -> str:
+    def answer_question_offline(self, model: str, messages, summary: str, input_text: str, doc_key: str = "") -> str:
         # Build system + user prompts with robust instructions for safety flags, counts, and dialogue
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         if is_ar:
@@ -1423,23 +1547,37 @@ class MainWindow(QMainWindow):
             )
         # Strictly use original document text only (no summary fallback)
         document_text = (input_text or "").strip()
-        if not document_text:
-            return "لا يوجد نص مستند متاح للأسئلة والأجوبة." if is_ar else "No document text available for Q&A."
-        # Extract the last user question from the messages
         user_question = ""
         for m in reversed(messages or []):
             if m.get("role") == "user":
                 user_question = (m.get("content", "") or "").strip()
                 break
+        vector_context = ""
+        if doc_key:
+            try:
+                docs = self.large_doc_manager.retrieve_context(doc_key, user_question or "")
+            except Exception:
+                docs = []
+            if docs:
+                collected: List[str] = []
+                for doc in docs:
+                    chunk = getattr(doc, 'page_content', '') or ''
+                    if chunk.strip():
+                        collected.append(chunk.strip())
+                vector_context = "\n\n".join(collected)
+        context_text = vector_context or document_text
+        if not context_text:
+            return "لا يوجد نص مستند متاح للأسئلة والأجوبة." if is_ar else "No document context available for Q&A."
+        # Extract the last user question from the messages
         if is_ar:
             user_prompt = (
-                "نص المستند:\n" + document_text + "\n\n" +
+                "مقاطع سياقية:\n" + context_text + "\n\n" +
                 "سؤال المستخدم:\n" + user_question + "\n\n" +
                 "أجب بالعربية اعتمادًا فقط على نص المستند. لا تضف معلومات خارجية."
             )
         else:
             user_prompt = (
-                "Document text:\n" + document_text + "\n\n" +
+                "Context passages:\n" + context_text + "\n\n" +
                 "User Question:\n" + user_question + "\n\n" +
                 "Answer strictly based on the document text only."
             )
@@ -1455,7 +1593,7 @@ class MainWindow(QMainWindow):
             pass
         return str(result)
 
-    def answer_question_gemini(self, model: str, messages, summary: str, input_text: str, api_key: str) -> Optional[str]:
+    def answer_question_gemini(self, model: str, messages, summary: str, input_text: str, api_key: str, doc_key: str = "") -> Optional[str]:
         genai.configure(api_key=api_key)  # type: ignore
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         if is_ar:
@@ -1471,22 +1609,36 @@ class MainWindow(QMainWindow):
         m = genai.GenerativeModel(model_name=model, system_instruction=system_prompt)  # type: ignore
         # Strictly use original document text only (no summary fallback)
         document_text = (input_text or "").strip()
-        if not document_text:
-            return "لا يوجد نص مستند متاح للأسئلة والأجوبة." if is_ar else "No document text available for Q&A."
         user_question = ""
         for mobj in reversed(messages or []):
             if mobj.get("role") == "user":
                 user_question = (mobj.get("content", "") or "").strip()
                 break
+        vector_context = ""
+        if doc_key:
+            try:
+                docs = self.large_doc_manager.retrieve_context(doc_key, user_question or "")
+            except Exception:
+                docs = []
+            if docs:
+                collected: List[str] = []
+                for doc in docs:
+                    piece = getattr(doc, 'page_content', '') or ''
+                    if piece.strip():
+                        collected.append(piece.strip())
+                vector_context = "\n\n".join(collected)
+        context_text = vector_context or document_text
+        if not context_text:
+            return "لا يوجد نص مستند متاح للأسئلة والأجوبة." if is_ar else "No document context available for Q&A."
         if is_ar:
             user_prompt = (
-                "نص المستند:\n" + document_text + "\n\n" +
+                "مقاطع سياقية:\n" + context_text + "\n\n" +
                 "سؤال المستخدم:\n" + user_question + "\n\n" +
                 "أجب بالعربية اعتمادًا فقط على نص المستند. لا تضف معلومات خارجية."
             )
         else:
             user_prompt = (
-                "Document text:\n" + document_text + "\n\n" +
+                "Context passages:\n" + context_text + "\n\n" +
                 "User Question:\n" + user_question + "\n\n" +
                 "Answer strictly based on the document text only."
             )
@@ -1510,12 +1662,38 @@ class MainWindow(QMainWindow):
             pass
         return {}
 
+    def _get_selected_model(self) -> str:
+        """Get the currently selected model from UI."""
+        try:
+            if hasattr(self.ui, 'availableModelCombo'):
+                selected = self.ui.availableModelCombo.currentText().strip()
+                if selected and not selected.startswith("Ollama") and not selected.startswith("No models") and not selected.startswith("Failed"):
+                    return selected
+        except Exception:
+            pass
+        # Default fallback - try some common models
+        fallback_models = ["llama3.2", "llama3.1", "mistral", "codellama"]
+        for model in fallback_models:
+            try:
+                # Quick check if model might be available (this is a rough check)
+                if self.is_ollama_available() and self.is_ollama_server_running():
+                    available = self.list_ollama_models()
+                    if model in available:
+                        return model
+            except Exception:
+                pass
+        return "llama3.2"  # Final fallback
+
     def _get_gemini_key(self) -> str:
-        data = self._read_config()
-        key = data.get("GOOGLE_API_KEY")
-        if key:
-            return key
-        # fallback to QSettings
+        """Get the Gemini API key from config or QSettings."""
+        try:
+            data = self._read_config()
+            key = data.get("GOOGLE_API_KEY")
+            if key:
+                return key
+        except Exception:
+            pass
+        # Fallback to QSettings
         return self.settings_window.settings.value("GOOGLE_API_KEY", "", type=str)
 
     def is_ollama_available(self) -> bool:
@@ -1570,10 +1748,12 @@ class MainWindow(QMainWindow):
             self.ui.availableModelCombo.addItem("Ollama server is not running")
             return
         names = self.list_ollama_models()
+        # Exclude embedding models from LLM selection
+        names = [name for name in names if not name.startswith("nomic-embed-text")]
         if names:
             self.ui.availableModelCombo.addItems(names)
         else:
-            self.ui.availableModelCombo.addItem("No models installed")
+            self.ui.availableModelCombo.addItem("No chat models available")
 
     def populate_online_models(self, provider: str):
         if not hasattr(self.ui, 'availableModelCombo'):
@@ -1609,9 +1789,14 @@ class _AnalysisWorker(QObject):
             file_path = self.params.get("file_path")
             input_text = self.params.get("input_text")
             gemini_key = self.params.get("gemini_key")
+            doc_key = self.params.get("doc_key", "")
 
             # Move potentially heavy file text extraction to the worker thread
             try:
+                if doc_key and self.window.large_doc_manager.has_vector_store(doc_key):
+                    context = self.window.large_doc_manager.build_summary_context(doc_key)
+                    if context.strip():
+                        input_text = context
                 if file_path and not is_image and not (input_text or "").strip():
                     if not os.path.exists(file_path):
                         self.error.emit("", f"File does not exist:\n{file_path}")
@@ -1633,6 +1818,8 @@ class _AnalysisWorker(QObject):
                     # Leave empty so Q&A will fallback to summary
                     effective_text = ""
                 self.window._qa_document_text = effective_text
+                if doc_key and self.window.large_doc_manager.has_vector_store(doc_key):
+                    self.window._qa_vector_doc_key = doc_key
             except Exception:
                 pass
 
@@ -1673,21 +1860,58 @@ class _QAWorker(QObject):
             summary = self.params.get("summary")
             input_text = self.params.get("input_text")
             gemini_key = self.params.get("gemini_key")
+            doc_key = self.params.get("doc_key", "")
 
             if not model:
                 self.error.emit("No model selected for Q&A")
                 return
             if provider == "ollama":
-                answer = self.window.answer_question_offline(model, messages, summary, input_text)
+                answer = self.window.answer_question_offline(model, messages, summary, input_text, doc_key)
                 self.finished.emit(answer or "")
                 return
             if provider == "gemini":
-                answer = self.window.answer_question_gemini(model, messages, summary, input_text, gemini_key)
+                answer = self.window.answer_question_gemini(model, messages, summary, input_text, gemini_key, doc_key)
                 self.finished.emit(answer or "")
                 return
             self.error.emit("Unknown provider for Q&A")
         except Exception as e:
             self.error.emit(str(e))
+
+
+class LargeDocProcessWorker(QObject):
+    finished = pyqtSignal(str, int)
+    error = pyqtSignal(str)
+
+    def __init__(self, window: 'MainWindow', file_path: str, doc_key: str):
+        super().__init__()
+        self.window = window
+        self.file_path = file_path
+        self.doc_key = doc_key
+
+    @pyqtSlot()
+    def run(self):
+        print(f"LargeDocProcessWorker.run started for {self.file_path}, doc_key: {self.doc_key}")
+        try:
+            if not os.path.exists(self.file_path):
+                self.error.emit(f"File does not exist:\n{self.file_path}")
+                return
+            print("File exists, extracting text")
+            text = self.window.extract_text_from_file(self.file_path)
+            print(f"Text extracted, length: {len(text)}")
+            if not text or not text.strip():
+                self.error.emit("Could not extract text from the file or file is empty.")
+                return
+            print("Calling prepare_document")
+            chunk_count = self.window.large_doc_manager.prepare_document(
+                self.doc_key,
+                self.file_path,
+                text,
+            )
+            print(f"prepare_document completed, chunks: {chunk_count}")
+            self.finished.emit(self.doc_key, chunk_count)
+        except Exception as e:
+            print(f"Exception in LargeDocProcessWorker: {e}")
+            self.error.emit(f"Processing failed: {str(e)}")
 
 
 class _RefreshWorker(QObject):

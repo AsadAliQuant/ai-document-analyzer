@@ -37,6 +37,18 @@ class SettingsWindow(QDialog):
         if hasattr(self.ui, 'geminiKeyEdit'):
             self.ui.geminiKeyEdit.setText(gemini_qsettings_key)
 
+        # Load embedding model from config
+        try:
+            if os.path.exists(self.config_path):
+                with open(self.config_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    embedding_model = data.get("EMBEDDING_MODEL", "nomic-embed-text")
+                    if hasattr(self.ui, 'embeddingModelEdit'):
+                        self.ui.embeddingModelEdit.setText(embedding_model)
+        except Exception:
+            if hasattr(self.ui, 'embeddingModelEdit'):
+                self.ui.embeddingModelEdit.setText("nomic-embed-text")
+
         # Load API keys from config.json if present
         try:
             if os.path.exists(self.config_path):
@@ -63,6 +75,9 @@ class SettingsWindow(QDialog):
             if hasattr(self.ui, 'geminiKeyEdit'):
                 existing["GOOGLE_API_KEY"] = self.ui.geminiKeyEdit.text()
                 self.settings.setValue("GOOGLE_API_KEY", self.ui.geminiKeyEdit.text())
+            if hasattr(self.ui, 'embeddingModelEdit'):
+                model = self.ui.embeddingModelEdit.text().strip()
+                existing["EMBEDDING_MODEL"] = model if model else "nomic-embed-text"
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(existing, f, indent=2)
         except Exception:
@@ -113,6 +128,8 @@ class SettingsWindow(QDialog):
             self.setWindowTitle("الإعدادات" if is_ar else "Settings")
             if hasattr(self.ui, 'geminiKeyLabel'):
                 self.ui.geminiKeyLabel.setText("مفتاح Gemini:" if is_ar else "Gemini API Key:")
+            if hasattr(self.ui, 'embeddingModelLabel'):
+                self.ui.embeddingModelLabel.setText("نموذج التضمين:" if is_ar else "Embedding Model:")
             if hasattr(self.ui, 'saveButton'):
                 self.ui.saveButton.setText("حفظ" if is_ar else "Save")
             if hasattr(self.ui, 'toggleLanguageButton'):

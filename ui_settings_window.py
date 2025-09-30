@@ -17,13 +17,19 @@ class Ui_SettingsWindow(object):
         except Exception:
             pass
 
-
         # Gemini API Key
         self.geminiKeyLabel = QtWidgets.QLabel("Gemini API Key:")
         self.geminiKeyEdit = QtWidgets.QLineEdit()
         self.geminiKeyEdit.setEchoMode(QtWidgets.QLineEdit.EchoMode.Password)
         self.layout.addWidget(self.geminiKeyLabel)
         self.layout.addWidget(self.geminiKeyEdit)
+
+        # Embedding Model
+        self.embeddingModelLabel = QtWidgets.QLabel("Embedding Model:")
+        self.embeddingModelEdit = QtWidgets.QLineEdit()
+        self.embeddingModelEdit.setPlaceholderText("nomic-embed-text")
+        self.layout.addWidget(self.embeddingModelLabel)
+        self.layout.addWidget(self.embeddingModelEdit)
 
         # Save Button
         self.saveButton = QtWidgets.QPushButton("Save")

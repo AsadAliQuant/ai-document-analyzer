@@ -68,6 +68,7 @@ pyinstaller "AI Document Analyzer.spec"
 ### For Ollama Integration
 - Ollama installed and running
 - LLaMA models downloaded via Ollama
+- For large document processing: Embedding model (default: `nomic-embed-text`, configurable in Settings)
 
 ### For Gemini Integration
 - Google API key (configured in settings)
@@ -81,6 +82,7 @@ pyinstaller "AI Document Analyzer.spec"
 ### Settings
 - Access via Settings button in application
 - Configure API keys and preferences
+- Configure embedding model for large document processing
 - Language selection (English/Arabic)
 
 ## Troubleshooting
