@@ -9,4 +9,6 @@ sentence-transformers>=2.2.0
 torch>=2.0.0
 langchain-huggingface>=0.0.1
 numpy>=1.23.0
-faiss-cpu; python_version < "3.13"
+chromadb>=0.4.0
+easyocr>=1.7.0
+Pillow>=10.0.0

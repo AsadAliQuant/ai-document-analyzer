@@ -3,17 +3,30 @@ import json
 import os
 import time
 from typing import List, Optional
-import numpy as np
+
+try:
+    import torch  # type: ignore
+except Exception:
+    torch = None  # type: ignore
+
+try:
+    import chromadb  # type: ignore
+    from chromadb.config import Settings as ChromaSettings  # type: ignore
+    _chromadb_available = True
+except Exception:
+    chromadb = None  # type: ignore
+    ChromaSettings = None  # type: ignore
+    _chromadb_available = False
 
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 try:
-    from langchain_community.vectorstores import FAISS  # type: ignore
-    _faiss_available = True
+    from langchain_community.vectorstores import Chroma  # type: ignore
+    _chroma_vectorstore_available = True
 except Exception:
-    FAISS = None  # type: ignore
-    _faiss_available = False
+    Chroma = None  # type: ignore
+    _chroma_vectorstore_available = False
 
 
 class LargeDocumentManager:
@@ -23,7 +36,11 @@ class LargeDocumentManager:
         self.base_dir = base_dir
         self.vector_base_dir = os.path.join(self.base_dir, "vector_store")
         os.makedirs(self.vector_base_dir, exist_ok=True)
-        # No external DB settings required for FAISS
+        self._chroma_client = None
+        if not _chromadb_available:
+            raise RuntimeError(
+                "ChromaDB is not available. Install 'chromadb' to enable vector storage."
+            )
 
     # ------------------------------------------------------------------
     # Metadata helpers
@@ -53,19 +70,13 @@ class LargeDocumentManager:
     def backend_marker_path(self, doc_key: str) -> str:
         return os.path.join(self.doc_store_path(doc_key), "backend.json")
 
-    def simple_index_path(self, doc_key: str) -> str:
-        return os.path.join(self.doc_store_path(doc_key), "simple_index.npz")
-
     def has_vector_store(self, doc_key: str) -> bool:
         store_dir = self.doc_store_path(doc_key)
         if not os.path.isdir(store_dir):
             return False
-        # FAISS artifacts
-        faiss_idx = os.path.join(store_dir, "index.faiss")
-        faiss_pkl = os.path.join(store_dir, "index.pkl")
-        if os.path.exists(faiss_idx) and os.path.exists(faiss_pkl):
-            return True
-        if os.path.exists(self.simple_index_path(doc_key)):
+        # Check for ChromaDB artifacts
+        chroma_dir = os.path.join(store_dir, "chroma_db")
+        if os.path.isdir(chroma_dir):
             return True
         # Check backend marker
         marker = self.backend_marker_path(doc_key)
@@ -73,9 +84,9 @@ class LargeDocumentManager:
             try:
                 with open(marker, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                return bool(data.get("backend"))
+                return data.get("backend") == "chromadb"
             except Exception:
-                return False
+                pass
         return False
 
     # ------------------------------------------------------------------
@@ -120,21 +131,32 @@ class LargeDocumentManager:
         embeddings = self._embedding()
         print("Embeddings created successfully")
 
-        used_backend = ""
-        if _faiss_available:
+        # Create ChromaDB vector store
+        chroma_dir = os.path.join(store_dir, "chroma_db")
+        if os.path.exists(chroma_dir):
+            import shutil
             try:
-                print("Creating FAISS vector store")
-                vector_store = FAISS.from_documents(documents, embeddings)
-                vector_store.save_local(store_dir)
-                used_backend = "faiss"
-                print("FAISS vector store created")
-            except Exception as e:
-                print(f"Error creating FAISS vector store: {e}")
-        if not used_backend:
-            print("Falling back to simple NumPy-based index...")
-            self._build_simple_index(store_dir, documents, embeddings)
-            used_backend = "simple"
-            print("Simple index created successfully")
+                shutil.rmtree(chroma_dir)
+            except Exception:
+                pass
+        
+        try:
+            print("Creating ChromaDB vector store")
+            vector_store = Chroma.from_documents(
+                documents=documents,
+                embedding=embeddings,
+                persist_directory=chroma_dir,
+                collection_name=f"doc_{doc_key}"
+            )
+            # Persist to disk
+            if hasattr(vector_store, '_client') and hasattr(vector_store._client, 'persist'):
+                vector_store._client.persist()
+            used_backend = "chromadb"
+            print("ChromaDB vector store created successfully")
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to create ChromaDB vector store: {e}"
+            ) from e
 
         self._write_backend_marker(store_dir, backend=used_backend)
 
@@ -169,42 +191,23 @@ class LargeDocumentManager:
         return "\n\n".join(collected)
 
     def retrieve_context(self, doc_key: str, query: str, k: int = 4) -> List[Document]:
-        # Try Chroma path first if available
-        store = self._load_vector_store(doc_key)
-        if store is not None:
-            try:
-                return store.similarity_search(query, k=k)
-            except Exception:
-                pass
-        # Fallback: simple index retrieval
-        idx_path = self.simple_index_path(doc_key)
-        if not os.path.exists(idx_path):
+        store_dir = self.doc_store_path(doc_key)
+        chroma_dir = os.path.join(store_dir, "chroma_db")
+        
+        if not os.path.isdir(chroma_dir):
             return []
+        
         try:
-            data = np.load(idx_path)
-            vectors = data["vectors"]  # shape (n, d), normalized
-            indices = data["indices"].astype(int)
-            # Embed query and normalize
-            q = self._embedding().embed_query(query)
-            qv = np.array(q, dtype=np.float32)
-            qn = qv / (np.linalg.norm(qv) + 1e-12)
-            sims = vectors @ qn
-            topk = np.argsort(-sims)[: max(1, int(k))]
-            # Build Documents using chunks.json
-            chunks = self._read_chunks(doc_key)
-            out: List[Document] = []
-            for pos in topk:
-                chunk_idx = int(indices[int(pos)])
-                # Find content by index
-                try:
-                    entry = next((c for c in chunks if int(c.get("index", -1)) == chunk_idx), None)
-                    content = (entry or {}).get("content", "")
-                except Exception:
-                    content = ""
-                if content:
-                    out.append(Document(page_content=content, metadata={"chunk_index": chunk_idx}))
-            return out
-        except Exception:
+            embeddings = self._embedding()
+            vector_store = Chroma(
+                persist_directory=chroma_dir,
+                embedding_function=embeddings,
+                collection_name=f"doc_{doc_key}"
+            )
+            results = vector_store.similarity_search(query, k=max(1, int(k)))
+            return results
+        except Exception as e:
+            print(f"Error retrieving context from ChromaDB: {e}")
             return []
 
     # ------------------------------------------------------------------
@@ -212,37 +215,14 @@ class LargeDocumentManager:
     # ------------------------------------------------------------------
     def _embedding(self) -> HuggingFaceEmbeddings:
         print("Initializing HuggingFaceEmbeddings with all-MiniLM-L6-v2")
-        return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+        model_kwargs = {}
+        try:
+            if torch is not None and torch.cuda.is_available():
+                model_kwargs = {"device": "cuda"}
+        except Exception:
+            pass
+        return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2", model_kwargs=model_kwargs)
 
-    def _load_vector_store(self, doc_key: str):
-        store_dir = self.doc_store_path(doc_key)
-        if not os.path.isdir(store_dir):
-            return None
-        # Prefer backend marker to decide how to load
-        backend = self._read_backend_marker(doc_key)
-        if backend == "faiss" and _faiss_available:
-            try:
-                # In langchain 0.2+, allow_dangerous_deserialization may be needed
-                return FAISS.load_local(store_dir, self._embedding(), allow_dangerous_deserialization=True)
-            except Exception:
-                return None
-        # Fallback: simple index
-        if os.path.exists(self.simple_index_path(doc_key)):
-            return None  # simple index will be used directly in retrieve_context
-        return None
-
-    def _build_simple_index(self, store_dir: str, documents: List[Document], embeddings: HuggingFaceEmbeddings) -> None:
-        texts = [doc.page_content for doc in documents]
-        idxs = [int(doc.metadata.get("chunk_index", i)) for i, doc in enumerate(documents)]
-        # Compute embeddings
-        vecs = embeddings.embed_documents(texts)
-        # Normalize for cosine similarity
-        arr = np.array(vecs, dtype=np.float32)
-        norms = np.linalg.norm(arr, axis=1, keepdims=True) + 1e-12
-        arr = arr / norms
-        path = os.path.join(store_dir, "simple_index.npz")
-        np.savez(path, vectors=arr, indices=np.array(idxs, dtype=np.int32))
-        self._write_backend_marker(store_dir, backend="simple")
 
     def _write_backend_marker(self, store_dir: str, backend: str) -> None:
         try:

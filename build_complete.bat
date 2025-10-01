@@ -36,16 +36,10 @@ if %ERRORLEVEL% NEQ 0 (
   "%PYEXE%" -m pip install --upgrade pyinstaller
   "%PYEXE%" -c "import PyInstaller" >nul 2>&1
   if %ERRORLEVEL% NEQ 0 (
-    REM Try module invocation as a fallback check
-    "%PYEXE%" -m PyInstaller --version >nul 2>&1
-    if %ERRORLEVEL% NEQ 0 (
-      echo Failed to install PyInstaller. Aborting.
-      popd
-      pause
-      exit /b 1
-    ) else (
-      echo PyInstaller is ready.
-    )
+    echo Failed to install PyInstaller. Aborting.
+    popd
+    pause
+    exit /b 1
   ) else (
     echo PyInstaller is ready.
   )
@@ -78,12 +72,21 @@ echo Building %APP_NAME% executable...
   --collect-all google.generativeai ^
   --collect-all numpy ^
   --collect-all torch ^
-  --collect-submodules faiss ^
+  --collect-all chromadb ^
+  --collect-all easyocr ^
+  --collect-all PIL ^
   --collect-submodules langchain_community.vectorstores ^
   --collect-submodules langchain_huggingface ^
-  --hidden-import faiss ^
-  --hidden-import faiss.swigfaiss ^
-  --hidden-import faiss.swigfaiss_avx2 ^
+  --hidden-import chromadb ^
+  --hidden-import chromadb.api ^
+  --hidden-import chromadb.config ^
+  --hidden-import sqlite3 ^
+  --hidden-import easyocr ^
+  --hidden-import easyocr.recognition ^
+  --hidden-import easyocr.detection ^
+  --hidden-import PIL ^
+  --hidden-import PIL.Image ^
+  --hidden-import cv2 ^
   --hidden-import docx ^
   --hidden-import pkg_resources ^
   "%ENTRY%"

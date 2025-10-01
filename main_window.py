@@ -1,6 +1,5 @@
-from PyQt6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QSystemTrayIcon, QGroupBox, QVBoxLayout, QHBoxLayout, QTextBrowser, QLineEdit, QPushButton, QWidget, QComboBox, QLabel, QApplication, QGraphicsOpacityEffect
-from PyQt6.QtCore import QPropertyAnimation, QEasingCurve, QThread, QObject, pyqtSignal, pyqtSlot, QTimer, Qt, QRect, QRectF, QMarginsF
-from PyQt6.QtGui import QIcon, QPdfWriter, QPageSize, QTextDocument, QFont, QPainter, QImage
+from PyQt6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QSystemTrayIcon, QGroupBox, QVBoxLayout, QHBoxLayout, QTextBrowser, QLineEdit, QPushButton, QWidget, QComboBox, QLabel, QApplication, QGraphicsOpacityEffect, QFrame
+from PyQt6.QtCore import QPropertyAnimation, QEasingCurve, QThread, QObject, pyqtSignal, pyqtSlot, QTimer, Qt, QRect, QRectF, QMarginsF, QSize
 import json
 import re
 import os
@@ -12,12 +11,12 @@ from typing import Optional, List
 import base64
 import mimetypes
 import locale
-from large_doc_manager import LargeDocumentManager
+from startup_helper import InitializationWorker, LoadingOverlayMixin
 
 # Optional imports for file text extraction
 try:
     from PyPDF2 import PdfReader  # type: ignore
-except Exception:
+except ImportError:
     PdfReader = None  # type: ignore
 
 try:
@@ -35,13 +34,36 @@ try:
 except Exception:
     ollama_client = None
 
+try:
+    import easyocr  # type: ignore
+    from PIL import Image  # type: ignore
+    _ocr_available = True
+except Exception:
+    easyocr = None  # type: ignore
+    Image = None  # type: ignore
+    _ocr_available = False
 
-class MainWindow(QMainWindow):
+
+class MainWindow(LoadingOverlayMixin, QMainWindow):
     def __init__(self):
         super().__init__()
         self.ui = Ui_MainWindow()
         self.ui.setupUi(self)
         self._selected_file_path: str = ""
+        
+        # Create loading overlay
+        self._loading_overlay = None
+        self._loading_label = None
+        self._loading_timer = None
+        self._loading_dots = 0
+        self._init_in_progress = True
+        
+        # Show loading overlay immediately
+        self._create_loading_overlay()
+        self._show_loading_overlay("Initializing application")
+        
+        # Disable all UI during loading
+        self.setEnabled(False)
 
         # Settings Window
         self.settings_window = SettingsWindow(self)
@@ -121,25 +143,19 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         self.config_path = os.path.join(self.app_config_dir, "config.json")
-        # Initialize language to English by default (no persistence)
-        self.apply_language("en")
-        self.large_doc_manager = LargeDocumentManager(self.app_config_dir)
-        self._qa_vector_doc_key: str = ""
-        self._pending_analysis_params: Optional[dict] = None
-        self._processing_thread: Optional[QThread] = None
-        self._processing_worker: Optional['LargeDocProcessWorker'] = None
-        self.online_models_gemini = [
-            "gemini-2.5-flash",
-        ]
-        if hasattr(self.ui, 'modelSourceCombo'):
-            self.ui.modelSourceCombo.clear()
-            self.ui.modelSourceCombo.addItems(["Online (Google Gemini)", "Offline (Ollama LLaMA)"])
-            self.ui.modelSourceCombo.setCurrentIndex(0)
-            self.ui.modelSourceCombo.setEnabled(True)
-            self.ui.modelSourceCombo.currentIndexChanged.connect(self.on_model_source_changed)
-        if hasattr(self.ui, 'availableModelCombo'):
-            self.ui.availableModelCombo.clear()
-        self.on_model_source_changed()
+        # Defer heavy initialization to background thread
+        self._init_thread = QThread(self)
+        self._init_worker = InitializationWorker(self)
+        self._init_worker.moveToThread(self._init_thread)
+        self._init_thread.started.connect(self._init_worker.run)
+        self._init_worker.progress.connect(self._on_init_progress)
+        self._init_worker.finished.connect(self._on_init_finished)
+        self._init_worker.finished.connect(self._init_thread.quit)
+        self._init_worker.finished.connect(self._init_worker.deleteLater)
+        self._init_thread.finished.connect(self._init_thread.deleteLater)
+        
+        # Start initialization in background after a short delay (allow UI to paint)
+        QTimer.singleShot(100, self._init_thread.start)
 
         # Analyze button loader state
         self._analyze_loader_timer = QTimer(self)
@@ -207,16 +223,9 @@ class MainWindow(QMainWindow):
             self.ui.qaGroup.setGraphicsEffect(self._qa_opacity_effect)
         except Exception:
             pass
-        self._set_qa_group_enabled(False)
-
-        # Wire up actions
+        self.ui.questionLineEdit.returnPressed.connect(self._send_question)
         self.ui.sendQuestionButton.clicked.connect(self._send_question)
         self.ui.clearChatButton.clicked.connect(self._clear_chat)
-        try:
-            self.ui.questionLineEdit.returnPressed.connect(self._send_question)  # type: ignore[attr-defined]
-        except Exception:
-            pass
-
         # Typing indicator timer for Q&A
         self._qa_typing_timer = QTimer(self)
         self._qa_typing_timer.setInterval(300)
@@ -357,7 +366,8 @@ class MainWindow(QMainWindow):
         }
 
         doc_key = ""
-        if file_path and not is_image:
+        # Compute doc_key for both images and documents
+        if file_path:
             try:
                 doc_key = self.large_doc_manager.compute_document_key(file_path)
             except Exception:
@@ -366,19 +376,48 @@ class MainWindow(QMainWindow):
         else:
             params["doc_key"] = ""
 
-        if file_path and not is_image and doc_key:
-            if self._is_large_document(file_path):
-                self._current_doc_key = doc_key
+        # Handle both images and documents with RAG pipeline
+        if file_path and doc_key:
+            # Check if we need to process (images always use RAG now)
+            needs_processing = False
+            if is_image:
+                # Images always get OCR + RAG processing
+                needs_processing = True
                 has_store = bool(doc_key and self.large_doc_manager.has_vector_store(doc_key))
-                if not has_store:
+                if has_store:
+                    needs_processing = False  # Already processed
+            elif self._is_large_document(file_path):
+                needs_processing = True
+                has_store = bool(doc_key and self.large_doc_manager.has_vector_store(doc_key))
+                if has_store:
+                    needs_processing = False  # Already processed
+            
+            if needs_processing:
+                self._current_doc_key = doc_key
+                if is_image:
+                    # Prompt for OCR processing
+                    reply = QMessageBox.question(
+                        self,
+                        "Image OCR Processing",
+                        "This image will be processed using OCR and stored in vector database for enhanced Q&A.\n\nProceed?",
+                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+                    )
+                    if reply != QMessageBox.StandardButton.Yes:
+                        return
+                else:
+                    # Large document prompt
                     if not self._prompt_large_doc_processing():
                         return
-                    self._pending_analysis_params = params
-                    self._set_status("Processing document...")
-                    self._set_loading(True)
-                    print("Starting large doc processing worker")
-                    self._start_large_doc_processing(file_path, doc_key)
-                    return
+                
+                self._pending_analysis_params = params
+                self._set_status("Processing with OCR..." if is_image else "Processing document...")
+                self._set_loading(True)
+                print(f"Starting {'image OCR' if is_image else 'large doc'} processing worker")
+                self._start_large_doc_processing(file_path, doc_key, is_image=is_image)
+                return
+            
+            # Has vector store, use it
+            if doc_key and self.large_doc_manager.has_vector_store(doc_key):
                 self._qa_vector_doc_key = doc_key
             else:
                 self._qa_vector_doc_key = ""
@@ -538,10 +577,10 @@ class MainWindow(QMainWindow):
         )
         return reply == QMessageBox.StandardButton.Yes
 
-    def _start_large_doc_processing(self, file_path: str, doc_key: str):
-        """Start background processing for large documents."""
+    def _start_large_doc_processing(self, file_path: str, doc_key: str, is_image: bool = False):
+        """Start background processing for large documents or images with OCR."""
         self._processing_thread = QThread(self)
-        self._processing_worker = LargeDocProcessWorker(self, file_path, doc_key)
+        self._processing_worker = LargeDocProcessWorker(self, file_path, doc_key, is_image=is_image)
         self._processing_worker.moveToThread(self._processing_thread)
         self._processing_thread.started.connect(self._processing_worker.run)
         self._processing_worker.finished.connect(self._on_large_doc_processing_finished)
@@ -1118,9 +1157,14 @@ class MainWindow(QMainWindow):
         return b64, mime
 
     def extract_text_from_file(self, file_path: str) -> str:
-        """Extract text from PDF, DOCX, or TXT files. Raises on unsupported types."""
+        """Extract text from PDF, DOCX, TXT, or image files. Raises on unsupported types."""
         _, ext = os.path.splitext(file_path)
         ext = (ext or "").lower()
+        
+        # Handle images with OCR
+        if ext in {".png", ".jpg", ".jpeg"}:
+            return self.extract_text_from_image_ocr(file_path)
+        
         if ext == ".pdf":
             if PdfReader is None:
                 raise RuntimeError("PyPDF2 not installed. Please install 'PyPDF2'.")
@@ -1144,6 +1188,50 @@ class MainWindow(QMainWindow):
         if ext == ".doc":
             raise RuntimeError(".doc files are not supported. Please convert to .docx or PDF.")
         raise RuntimeError(f"Unsupported file type: {ext}")
+    
+    def extract_text_from_image_ocr(self, file_path: str) -> str:
+        """Extract text from image using EasyOCR."""
+        if not _ocr_available:
+            raise RuntimeError("EasyOCR not installed. Please install 'easyocr' and 'Pillow'.")
+        
+        # Lazy-load OCR reader (expensive initialization)
+        if self._ocr_reader is None:
+            try:
+                # Initialize with English and Arabic support, GPU if available
+                import torch
+                gpu = torch.cuda.is_available()
+                self._ocr_reader = easyocr.Reader(['en', 'ar'], gpu=gpu)
+            except Exception as e:
+                raise RuntimeError(f"Failed to initialize EasyOCR reader: {e}")
+        
+        try:
+            # Read image
+            img = Image.open(file_path)
+            # Convert to RGB if needed
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Perform OCR
+            results = self._ocr_reader.readtext(file_path)
+            
+            # Extract text from results
+            # EasyOCR returns list of (bbox, text, confidence)
+            extracted_lines = []
+            for detection in results:
+                if len(detection) >= 2:
+                    text = detection[1]
+                    if text and text.strip():
+                        extracted_lines.append(text.strip())
+            
+            full_text = "\n".join(extracted_lines)
+            if not full_text.strip():
+                raise RuntimeError("No text detected in the image. The image may be blank or contain no readable text.")
+            
+            return full_text
+        except Exception as e:
+            if "No text detected" in str(e):
+                raise
+            raise RuntimeError(f"OCR extraction failed: {e}")
 
     # --- Summarization Helpers ---
     def summarize_text_offline(self, model: str, input_text: str) -> str:
@@ -1794,10 +1882,12 @@ class _AnalysisWorker(QObject):
             # Move potentially heavy file text extraction to the worker thread
             try:
                 if doc_key and self.window.large_doc_manager.has_vector_store(doc_key):
+                    # Use vector store context (for both documents and images with OCR)
                     context = self.window.large_doc_manager.build_summary_context(doc_key)
                     if context.strip():
                         input_text = context
-                if file_path and not is_image and not (input_text or "").strip():
+                elif file_path and not (input_text or "").strip():
+                    # Extract text from file (includes OCR for images)
                     if not os.path.exists(file_path):
                         self.error.emit("", f"File does not exist:\n{file_path}")
                         return
@@ -1813,28 +1903,19 @@ class _AnalysisWorker(QObject):
             # Persist the effective document text for Q&A usage
             try:
                 effective_text = (input_text or "").strip()
-                if not effective_text and is_image and file_path:
-                    # For images, we do not OCR locally; rely on model context
-                    # Leave empty so Q&A will fallback to summary
-                    effective_text = ""
                 self.window._qa_document_text = effective_text
                 if doc_key and self.window.large_doc_manager.has_vector_store(doc_key):
                     self.window._qa_vector_doc_key = doc_key
             except Exception:
                 pass
 
+            # For both ollama and gemini, use OCR text instead of vision models
             if provider == "ollama":
-                if is_image and file_path:
-                    summary = self.window.summarize_image_offline(model, file_path)
-                else:
-                    summary = self.window.summarize_text_offline(model, input_text)
+                summary = self.window.summarize_text_offline(model, input_text)
                 self.finished.emit(summary or "(No response)", "Offline - Done", "Analysis Complete", "Your offline analysis has finished.")
                 return
             if provider == "gemini":
-                if is_image and file_path:
-                    summary = self.window.summarize_image_gemini(model, file_path, gemini_key)
-                else:
-                    summary = self.window.summarize_text_gemini(model, input_text, gemini_key)
+                summary = self.window.summarize_text_gemini(model, input_text, gemini_key)
                 self.finished.emit(summary or "(No response)", "Online - Gemini Done", "Analysis Complete", "Your Gemini analysis has finished.")
                 return
             self.error.emit("", "Unknown provider")
@@ -1882,26 +1963,38 @@ class LargeDocProcessWorker(QObject):
     finished = pyqtSignal(str, int)
     error = pyqtSignal(str)
 
-    def __init__(self, window: 'MainWindow', file_path: str, doc_key: str):
+    def __init__(self, window: 'MainWindow', file_path: str, doc_key: str, is_image: bool = False):
         super().__init__()
         self.window = window
         self.file_path = file_path
         self.doc_key = doc_key
+        self.is_image = is_image
 
     @pyqtSlot()
     def run(self):
-        print(f"LargeDocProcessWorker.run started for {self.file_path}, doc_key: {self.doc_key}")
+        file_type = "image" if self.is_image else "document"
+        print(f"LargeDocProcessWorker.run started for {file_type}: {self.file_path}, doc_key: {self.doc_key}")
         try:
             if not os.path.exists(self.file_path):
                 self.error.emit(f"File does not exist:\n{self.file_path}")
                 return
-            print("File exists, extracting text")
+            
+            if self.is_image:
+                print("Extracting text from image using OCR...")
+            else:
+                print("File exists, extracting text")
+            
             text = self.window.extract_text_from_file(self.file_path)
             print(f"Text extracted, length: {len(text)}")
+            
             if not text or not text.strip():
-                self.error.emit("Could not extract text from the file or file is empty.")
+                if self.is_image:
+                    self.error.emit("OCR could not extract any text from the image. The image may be blank or contain no readable text.")
+                else:
+                    self.error.emit("Could not extract text from the file or file is empty.")
                 return
-            print("Calling prepare_document")
+            
+            print(f"Calling prepare_document with {len(text)} characters")
             chunk_count = self.window.large_doc_manager.prepare_document(
                 self.doc_key,
                 self.file_path,
@@ -1911,7 +2004,8 @@ class LargeDocProcessWorker(QObject):
             self.finished.emit(self.doc_key, chunk_count)
         except Exception as e:
             print(f"Exception in LargeDocProcessWorker: {e}")
-            self.error.emit(f"Processing failed: {str(e)}")
+            error_msg = f"OCR processing failed: {str(e)}" if self.is_image else f"Processing failed: {str(e)}"
+            self.error.emit(error_msg)
 
 
 class _RefreshWorker(QObject):
