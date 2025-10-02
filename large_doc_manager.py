@@ -126,25 +126,31 @@ class LargeDocumentManager:
 
         # Create Qdrant vector store
         qdrant_dir = os.path.join(store_dir, "qdrant_db")
+        
+        # Aggressive cleanup with retries
         if os.path.exists(qdrant_dir):
             import shutil
-            try:
-                shutil.rmtree(qdrant_dir)
-            except Exception:
-                pass
+            for attempt in range(3):
+                try:
+                    shutil.rmtree(qdrant_dir)
+                    break
+                except Exception as cleanup_err:
+                    if attempt < 2:
+                        print(f"Cleanup attempt {attempt + 1} failed, retrying...")
+                        time.sleep(0.5)
+                    else:
+                        print(f"Warning: Could not remove old qdrant_dir: {cleanup_err}")
         
+        vector_store = None
         try:
             print("Creating Qdrant vector store")
-            # Create embedded Qdrant client
-            qdrant_client = QdrantClient(path=qdrant_dir)
-            
-            # Create vector store from documents
+            # Let Qdrant.from_documents create the client internally
             vector_store = Qdrant.from_documents(
                 documents=documents,
                 embedding=embeddings,
                 path=qdrant_dir,
                 collection_name=f"doc_{doc_key}",
-                force_recreate=True
+                force_recreate=True,
             )
             used_backend = "qdrant"
             print("Qdrant vector store created successfully")
@@ -152,6 +158,17 @@ class LargeDocumentManager:
             raise RuntimeError(
                 f"Failed to create Qdrant vector store: {e}"
             ) from e
+        finally:
+            # Close the client to release locks
+            if vector_store is not None:
+                client = getattr(vector_store, "client", None) or getattr(vector_store, "_client", None)
+                if client is not None and hasattr(client, "close"):
+                    try:
+                        client.close()
+                    except Exception:
+                        pass
+            # Small delay to ensure Windows releases file locks
+            time.sleep(0.2)
 
         self._write_backend_marker(store_dir, backend=used_backend)
 
@@ -192,22 +209,27 @@ class LargeDocumentManager:
         if not os.path.isdir(qdrant_dir):
             return []
         
+        qdrant_client = None
         try:
             embeddings = self._embedding()
-            # Create embedded Qdrant client
             qdrant_client = QdrantClient(path=qdrant_dir)
-            
-            # Load existing vector store
+
             vector_store = Qdrant(
                 client=qdrant_client,
                 collection_name=f"doc_{doc_key}",
-                embeddings=embeddings
+                embeddings=embeddings,
             )
             results = vector_store.similarity_search(query, k=max(1, int(k)))
             return results
         except Exception as e:
             print(f"Error retrieving context from Qdrant: {e}")
             return []
+        finally:
+            if qdrant_client is not None and hasattr(qdrant_client, "close"):
+                try:
+                    qdrant_client.close()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Internal helpers
