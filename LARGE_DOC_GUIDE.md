@@ -20,7 +20,7 @@ The AI Document Analyzer supports processing large documents (PDFs, DOCX, TXT fi
 2. **Chunking & Embedding**:
    - Documents/OCR text split into manageable chunks (1200 characters each with 200 character overlap)
    - Each chunk is embedded using sentence-transformers (all-MiniLM-L6-v2 model)
-   - Chunks are stored in a local ChromaDB vector database
+   - Chunks are stored in an embedded Qdrant vector database (runs in-process, no server needed)
    - GPU acceleration is used automatically when CUDA is available
 
 ### RAG (Retrieval-Augmented Generation)
@@ -58,7 +58,7 @@ The AI Document Analyzer supports processing large documents (PDFs, DOCX, TXT fi
 
 ### Dependencies
 - **LangChain**: Text splitting and vector store management
-- **ChromaDB**: Embedded vector database (no server required)
+- **Qdrant**: Embedded vector database (runs in-process, no server required)
 - **Sentence Transformers**: all-MiniLM-L6-v2 for embeddings
 - **PyTorch**: Enables GPU acceleration when CUDA is available
 - **EasyOCR**: Local OCR engine for text extraction from images
@@ -120,10 +120,10 @@ The application automatically detects and uses NVIDIA CUDA GPUs when available:
 
 ### Common Issues
 
-**"ChromaDB is not available"**
-- Ensure Python 3.11 is installed (required for ChromaDB)
-- Run: `pip install chromadb>=0.4.0`
+**"Qdrant is not available"**
+- Run: `pip install qdrant-client>=1.7.0`
 - Reinstall dependencies from requirements.txt
+- Works with any Python version (3.8+)
 
 **"EasyOCR not installed"**
 - Run: `pip install easyocr>=1.7.0 Pillow>=10.0.0`
@@ -133,7 +133,7 @@ The application automatically detects and uses NVIDIA CUDA GPUs when available:
 **"Failed to process image/document"**
 - Check file is not corrupted or password-protected
 - Ensure sufficient disk space for vector store
-- Verify ChromaDB and EasyOCR installed correctly
+- Verify Qdrant and EasyOCR installed correctly
 - For images: ensure image contains readable text
 
 **"No text detected in the image"**

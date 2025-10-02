@@ -72,14 +72,13 @@ echo Building %APP_NAME% executable...
   --collect-all google.generativeai ^
   --collect-all numpy ^
   --collect-all torch ^
-  --collect-all chromadb ^
+  --collect-all qdrant_client ^
   --collect-all easyocr ^
   --collect-all PIL ^
   --collect-submodules langchain_community.vectorstores ^
   --collect-submodules langchain_huggingface ^
-  --hidden-import chromadb ^
-  --hidden-import chromadb.api ^
-  --hidden-import chromadb.config ^
+  --hidden-import qdrant_client ^
+  --hidden-import qdrant_client.models ^
   --hidden-import sqlite3 ^
   --hidden-import easyocr ^
   --hidden-import easyocr.recognition ^

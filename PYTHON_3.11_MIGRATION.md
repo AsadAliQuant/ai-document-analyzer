@@ -1,35 +1,32 @@
-# Python 3.11 Migration Guide
+# Python Version Compatibility Guide
 
-## Why Python 3.11?
+## Current Vector Store: Qdrant
 
-ChromaDB has better compatibility with Python 3.11 and avoids Rust compilation issues that can occur with Python 3.13. This migration ensures stable vector database functionality.
+The application now uses **Qdrant** as the vector database, which is compatible with Python 3.8+ including Python 3.11, 3.12, and 3.13. Qdrant runs embedded (in-process) and requires no external server.
 
 ## Migration Steps
 
-### 1. Uninstall Python 3.13
-1. **Windows Settings Method:**
-   - Press `Win + I` to open Settings
-   - Go to `Apps` → `Installed apps`
-   - Search for "Python 3.13"
-   - Click the three dots and select "Uninstall"
-   - Follow the uninstaller prompts
+### 1. Check Your Python Version
 
-2. **Control Panel Method:**
-   - Press `Win + R`, type `appwiz.cpl`, press Enter
-   - Find "Python 3.13" in the list
-   - Right-click and select "Uninstall"
-   - Complete the uninstallation wizard
+```powershell
+python --version
+# Any version 3.8+ works (3.11, 3.12, 3.13 all supported)
+```
 
-### 2. Install Python 3.11
+Qdrant is compatible with all modern Python versions. You do NOT need to downgrade or change your Python installation.
 
-1. **Download Python 3.11:**
+### 2. Install Python (if needed)
+
+If you need to install Python:
+
+1. **Download Python:**
    - Visit: https://www.python.org/downloads/
-   - Download Python 3.11.x (latest 3.11 release)
-   - Choose "Windows installer (64-bit)" for most systems
+   - Download Python 3.11+ (recommended: 3.11 or 3.12)
+   - Choose "Windows installer (64-bit)"
 
-2. **Install Python 3.11:**
+2. **Install Python:**
    - Run the downloaded installer
-   - **IMPORTANT:** Check "Add Python 3.11 to PATH"
+   - **IMPORTANT:** Check "Add Python to PATH"
    - Choose "Customize installation"
    - Enable all optional features (pip, tcl/tk, documentation, etc.)
    - Click "Install"
@@ -38,15 +35,14 @@ ChromaDB has better compatibility with Python 3.11 and avoids Rust compilation i
 3. **Verify Installation:**
    ```powershell
    python --version
-   # Should output: Python 3.11.x
+   # Should output: Python 3.11.x or higher
    
    pip --version
-   # Should reference Python 3.11
    ```
 
-### 3. Clean Your Virtual Environment
+### 3. Clean Your Virtual Environment (if upgrading)
 
-Navigate to your project directory and remove the old virtual environment:
+If you're upgrading from an older installation, navigate to your project directory and remove the old virtual environment:
 
 ```powershell
 cd "f:\Asad\Talha Projects\ai-document-analyzer"
@@ -85,7 +81,7 @@ python -m pip install --upgrade pip
 pip install -r requirements.txt
 
 # This will install:
-# - ChromaDB (vector database)
+# - Qdrant (embedded vector database)
 # - PyQt6 (UI framework)
 # - Sentence Transformers (embeddings)
 # - PyTorch (with CUDA support if available)
@@ -96,8 +92,8 @@ pip install -r requirements.txt
 ### 6. Verify Installation
 
 ```powershell
-# Test ChromaDB import
-python -c "import chromadb; print('ChromaDB OK')"
+# Test Qdrant import
+python -c "from qdrant_client import QdrantClient; print('Qdrant OK')"
 
 # Test sentence-transformers
 python -c "from sentence_transformers import SentenceTransformer; print('Sentence Transformers OK')"
@@ -118,11 +114,10 @@ python main.py
 
 ## Troubleshooting
 
-### Issue: "ChromaDB is not available"
+### Issue: "Qdrant is not available"
 **Solution:**
 ```powershell
-pip uninstall chromadb
-pip install chromadb>=0.4.0
+pip install qdrant-client>=1.7.0
 ```
 
 ### Issue: "torch is not available" or CUDA errors
@@ -151,9 +146,9 @@ py -3.11 -m venv .venv
 "C:\Users\YourUsername\AppData\Local\Programs\Python\Python311\python.exe" -m venv .venv
 ```
 
-### Issue: Old vector stores from Qdrant/FAISS
+### Issue: Old vector stores from ChromaDB/FAISS
 **Solution:**
-The new ChromaDB implementation will create new vector stores. Old stores are incompatible and will be ignored. To clean up:
+The new Qdrant implementation will create new vector stores. Old stores are incompatible and will be ignored. To clean up:
 
 ```powershell
 # Close the application first, then:
@@ -165,8 +160,8 @@ Re-process your documents after starting the app again.
 ## What Changed in the Code?
 
 1. **Vector Store Backend:**
-   - ❌ Removed: Qdrant, FAISS
-   - ✅ Added: ChromaDB
+   - ❌ Removed: ChromaDB, FAISS
+   - ✅ Added: Qdrant (embedded, in-process)
 
 2. **Image Processing:**
    - ✅ Added: EasyOCR for local text extraction from images
@@ -178,22 +173,23 @@ Re-process your documents after starting the app again.
    - Automatic GPU/CPU detection via PyTorch
 
 4. **Dependencies:**
-   - Replaced `qdrant-client` with `chromadb>=0.4.0`
-   - Added `easyocr>=1.7.0` and `Pillow>=10.0.0`
+   - Replaced `chromadb` with `qdrant-client>=1.7.0`
+   - Includes `easyocr>=1.7.0` and `Pillow>=10.0.0` for OCR
    - Updated build configuration in `build_complete.bat`
 
 5. **Files Modified:**
-   - `large_doc_manager.py` - Complete rewrite for ChromaDB
-   - `main_window.py` - Added OCR extraction and RAG for images
+   - `large_doc_manager.py` - Updated for embedded Qdrant
+   - `main_window.py` - OCR extraction and RAG for images
    - `requirements.txt` - Updated dependencies
    - `build_complete.bat` - Updated PyInstaller config
-   - `LARGE_DOC_GUIDE.md` - Updated documentation with OCR info
+   - `LARGE_DOC_GUIDE.md` - Updated documentation
 
-## Advantages of ChromaDB + EasyOCR + Python 3.11
+## Advantages of Qdrant + EasyOCR
 
-- ✅ **No External Server:** ChromaDB runs embedded, no background service needed
-- ✅ **Stable:** Avoids Rust/Cargo compilation issues
-- ✅ **Fast:** Efficient local SQLite-based storage
+- ✅ **No External Server:** Qdrant runs embedded in-process, no background service needed
+- ✅ **Python Version Flexibility:** Works with Python 3.8 through 3.13+
+- ✅ **Simple:** Pure Python implementation, no Rust compilation
+- ✅ **Fast:** Efficient in-memory and persistent storage
 - ✅ **Portable:** Easy to bundle with PyInstaller
 - ✅ **GPU Support:** Automatic CUDA acceleration for embeddings AND OCR when available
 - ✅ **OCR Privacy:** All text extraction happens locally, no cloud API calls

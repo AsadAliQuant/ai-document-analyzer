@@ -22,7 +22,7 @@ class InitializationWorker(QObject):
             self.progress.emit("Initializing language")
             self.window.apply_language("en")
             
-            # Step 2: Initialize document manager (heavy - loads ChromaDB)
+            # Step 2: Initialize document manager (heavy - loads Qdrant)
             self.progress.emit("Loading document manager")
             from large_doc_manager import LargeDocumentManager
             self.window.large_doc_manager = LargeDocumentManager(self.window.app_config_dir)

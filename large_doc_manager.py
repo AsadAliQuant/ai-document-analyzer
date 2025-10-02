@@ -10,23 +10,17 @@ except Exception:
     torch = None  # type: ignore
 
 try:
-    import chromadb  # type: ignore
-    from chromadb.config import Settings as ChromaSettings  # type: ignore
-    _chromadb_available = True
+    from qdrant_client import QdrantClient  # type: ignore
+    from langchain_community.vectorstores import Qdrant  # type: ignore
+    _qdrant_available = True
 except Exception:
-    chromadb = None  # type: ignore
-    ChromaSettings = None  # type: ignore
-    _chromadb_available = False
+    QdrantClient = None  # type: ignore
+    Qdrant = None  # type: ignore
+    _qdrant_available = False
 
 from langchain.schema import Document
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
-try:
-    from langchain_community.vectorstores import Chroma  # type: ignore
-    _chroma_vectorstore_available = True
-except Exception:
-    Chroma = None  # type: ignore
-    _chroma_vectorstore_available = False
 
 
 class LargeDocumentManager:
@@ -36,10 +30,9 @@ class LargeDocumentManager:
         self.base_dir = base_dir
         self.vector_base_dir = os.path.join(self.base_dir, "vector_store")
         os.makedirs(self.vector_base_dir, exist_ok=True)
-        self._chroma_client = None
-        if not _chromadb_available:
+        if not _qdrant_available:
             raise RuntimeError(
-                "ChromaDB is not available. Install 'chromadb' to enable vector storage."
+                "Qdrant is not available. Install 'qdrant-client' to enable vector storage."
             )
 
     # ------------------------------------------------------------------
@@ -74,9 +67,9 @@ class LargeDocumentManager:
         store_dir = self.doc_store_path(doc_key)
         if not os.path.isdir(store_dir):
             return False
-        # Check for ChromaDB artifacts
-        chroma_dir = os.path.join(store_dir, "chroma_db")
-        if os.path.isdir(chroma_dir):
+        # Check for Qdrant artifacts
+        qdrant_dir = os.path.join(store_dir, "qdrant_db")
+        if os.path.isdir(qdrant_dir):
             return True
         # Check backend marker
         marker = self.backend_marker_path(doc_key)
@@ -84,7 +77,7 @@ class LargeDocumentManager:
             try:
                 with open(marker, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                return data.get("backend") == "chromadb"
+                return data.get("backend") == "qdrant"
             except Exception:
                 pass
         return False
@@ -100,7 +93,7 @@ class LargeDocumentManager:
         chunk_size: int = 1200,
         chunk_overlap: int = 200,
     ) -> int:
-        """Split text, embed, and persist to Chroma. Returns chunk count."""
+        """Split text, embed, and persist to Qdrant. Returns chunk count."""
         print(f"prepare_document called for doc_key: {doc_key}, file: {file_path}")
         clean_text = (text or "").strip()
         print(f"Clean text length: {len(clean_text)}")
@@ -131,31 +124,33 @@ class LargeDocumentManager:
         embeddings = self._embedding()
         print("Embeddings created successfully")
 
-        # Create ChromaDB vector store
-        chroma_dir = os.path.join(store_dir, "chroma_db")
-        if os.path.exists(chroma_dir):
+        # Create Qdrant vector store
+        qdrant_dir = os.path.join(store_dir, "qdrant_db")
+        if os.path.exists(qdrant_dir):
             import shutil
             try:
-                shutil.rmtree(chroma_dir)
+                shutil.rmtree(qdrant_dir)
             except Exception:
                 pass
         
         try:
-            print("Creating ChromaDB vector store")
-            vector_store = Chroma.from_documents(
+            print("Creating Qdrant vector store")
+            # Create embedded Qdrant client
+            qdrant_client = QdrantClient(path=qdrant_dir)
+            
+            # Create vector store from documents
+            vector_store = Qdrant.from_documents(
                 documents=documents,
                 embedding=embeddings,
-                persist_directory=chroma_dir,
-                collection_name=f"doc_{doc_key}"
+                path=qdrant_dir,
+                collection_name=f"doc_{doc_key}",
+                force_recreate=True
             )
-            # Persist to disk
-            if hasattr(vector_store, '_client') and hasattr(vector_store._client, 'persist'):
-                vector_store._client.persist()
-            used_backend = "chromadb"
-            print("ChromaDB vector store created successfully")
+            used_backend = "qdrant"
+            print("Qdrant vector store created successfully")
         except Exception as e:
             raise RuntimeError(
-                f"Failed to create ChromaDB vector store: {e}"
+                f"Failed to create Qdrant vector store: {e}"
             ) from e
 
         self._write_backend_marker(store_dir, backend=used_backend)
@@ -192,22 +187,26 @@ class LargeDocumentManager:
 
     def retrieve_context(self, doc_key: str, query: str, k: int = 4) -> List[Document]:
         store_dir = self.doc_store_path(doc_key)
-        chroma_dir = os.path.join(store_dir, "chroma_db")
+        qdrant_dir = os.path.join(store_dir, "qdrant_db")
         
-        if not os.path.isdir(chroma_dir):
+        if not os.path.isdir(qdrant_dir):
             return []
         
         try:
             embeddings = self._embedding()
-            vector_store = Chroma(
-                persist_directory=chroma_dir,
-                embedding_function=embeddings,
-                collection_name=f"doc_{doc_key}"
+            # Create embedded Qdrant client
+            qdrant_client = QdrantClient(path=qdrant_dir)
+            
+            # Load existing vector store
+            vector_store = Qdrant(
+                client=qdrant_client,
+                collection_name=f"doc_{doc_key}",
+                embeddings=embeddings
             )
             results = vector_store.similarity_search(query, k=max(1, int(k)))
             return results
         except Exception as e:
-            print(f"Error retrieving context from ChromaDB: {e}")
+            print(f"Error retrieving context from Qdrant: {e}")
             return []
 
     # ------------------------------------------------------------------
