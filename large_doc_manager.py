@@ -105,6 +105,9 @@ class LargeDocumentManager:
         self._reset_directory(store_dir)
         os.makedirs(store_dir, exist_ok=True)
 
+        # Persist raw extracted text for debugging/inspection
+        self._write_raw_text(store_dir, clean_text)
+
         splitter = RecursiveCharacterTextSplitter(
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
@@ -182,6 +185,14 @@ class LargeDocumentManager:
         )
         print(f"prepare_document completed, returning {len(documents)} chunks")
         return len(documents)
+
+    def _write_raw_text(self, store_dir: str, content: str) -> None:
+        path = os.path.join(store_dir, "raw_extracted.txt")
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(content or "")
+        except Exception as e:
+            print(f"Warning: Failed to write raw text dump: {e}")
 
     # ------------------------------------------------------------------
     # Retrieval & context
