@@ -213,7 +213,7 @@ class LargeDocumentManager:
                 break
         return "\n\n".join(collected)
 
-    def retrieve_context(self, doc_key: str, query: str, k: int = 4) -> List[Document]:
+    def retrieve_context(self, doc_key: str, query: str, k: int = 15) -> List[Document]:
         store_dir = self.doc_store_path(doc_key)
         qdrant_dir = os.path.join(store_dir, "qdrant_db")
         
