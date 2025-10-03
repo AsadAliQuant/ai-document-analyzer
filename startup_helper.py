@@ -20,7 +20,7 @@ class InitializationWorker(QObject):
         try:
             # Step 1: Initialize language
             self.progress.emit("Initializing language")
-            self.window.apply_language("en")
+            # Language will be applied by the main thread if needed
             
             # Step 2: Initialize document manager (heavy - loads Qdrant)
             self.progress.emit("Loading document manager")
@@ -39,20 +39,8 @@ class InitializationWorker(QObject):
             self.progress.emit("Loading models")
             self.window.online_models_gemini = ["gemini-2.5-flash"]
             
-            # Step 5: Populate model combos
-            if hasattr(self.window.ui, 'modelSourceCombo'):
-                self.window.ui.modelSourceCombo.clear()
-                self.window.ui.modelSourceCombo.addItems(["Online (Google Gemini)", "Offline (Ollama LLaMA)"])
-                self.window.ui.modelSourceCombo.setCurrentIndex(0)
-                self.window.ui.modelSourceCombo.setEnabled(True)
-                self.window.ui.modelSourceCombo.currentIndexChanged.connect(self.window.on_model_source_changed)
-            
-            if hasattr(self.window.ui, 'availableModelCombo'):
-                self.window.ui.availableModelCombo.clear()
-            
-            # Step 6: Load initial models
+            # Step 5/6: Defer any UI population and model refresh to main thread
             self.progress.emit("Loading available models")
-            self.window.on_model_source_changed()
             
             # All done
             self.progress.emit("Ready")
@@ -98,12 +86,12 @@ class LoadingOverlayMixin:
         
         # Hide initially
         self._loading_overlay.hide()
-    
+
     def _show_loading_overlay(self, message: str = "Loading"):
         """Show the loading overlay with animated dots."""
         if not self._loading_overlay:
             return
-        
+
         # Update geometry to cover entire window
         self._loading_overlay.setGeometry(self.rect())
         self._loading_overlay.raise_()
@@ -111,23 +99,27 @@ class LoadingOverlayMixin:
         
         # Set base message
         self._loading_message_base = message
+        self._initial_loading_message = message
         self._loading_dots = 0
-        
+
         # Start animation timer
         if self._loading_timer is None:
             self._loading_timer = QTimer(self)
             self._loading_timer.timeout.connect(self._update_loading_animation)
         self._loading_timer.start(400)
-    
+
     def _update_loading_animation(self):
         """Update loading animation (dots)."""
         if not self._loading_label:
             return
-        
-        dots = "." * (self._loading_dots % 4)
-        self._loading_label.setText(f"{self._loading_message_base}{dots}")
+
+        # Always animate dots; if a constant base is requested, don't change the base text
+        base = getattr(self, "_initial_loading_message", self._loading_message_base)
+        # Cycle dots from 1..3 so at least one dot is always visible
+        dots = "." * ((self._loading_dots % 3) + 1)
+        self._loading_label.setText(f"{base}{dots}")
         self._loading_dots += 1
-    
+
     def _hide_loading_overlay(self):
         """Hide the loading overlay."""
         if self._loading_timer:
@@ -144,7 +136,10 @@ class LoadingOverlayMixin:
     @pyqtSlot(str)
     def _on_init_progress(self, message: str):
         """Update loading overlay with initialization progress."""
-        self._loading_message_base = message
+        if getattr(self, "_keep_loading_message_constant", False):
+            self._loading_message_base = getattr(self, "_initial_loading_message", message)
+        else:
+            self._loading_message_base = message
         self._loading_dots = 0
     
     @pyqtSlot()
@@ -158,6 +153,29 @@ class LoadingOverlayMixin:
         
         # Re-enable UI
         self.setEnabled(True)
+        
+        # Populate model source and available models combos on the main thread
+        try:
+            if hasattr(self.ui, 'modelSourceCombo'):
+                self.ui.modelSourceCombo.clear()
+                self.ui.modelSourceCombo.addItems(["Online (Google Gemini)", "Offline (Ollama LLaMA)"])
+                self.ui.modelSourceCombo.setCurrentIndex(0)
+                self.ui.modelSourceCombo.setEnabled(True)
+                # Ensure the signal is connected on the main thread
+                try:
+                    self.ui.modelSourceCombo.currentIndexChanged.connect(self.on_model_source_changed)
+                except Exception:
+                    pass
+            if hasattr(self.ui, 'availableModelCombo'):
+                self.ui.availableModelCombo.clear()
+        except Exception:
+            pass
+        
+        # Kick off initial model refresh on the main thread
+        try:
+            self.on_model_source_changed()
+        except Exception:
+            pass
         
         # Connect Q&A signals now
         try:

@@ -24,13 +24,6 @@ class Ui_SettingsWindow(object):
         self.layout.addWidget(self.geminiKeyLabel)
         self.layout.addWidget(self.geminiKeyEdit)
 
-        # Embedding Model
-        self.embeddingModelLabel = QtWidgets.QLabel("Embedding Model:")
-        self.embeddingModelEdit = QtWidgets.QLineEdit()
-        self.embeddingModelEdit.setPlaceholderText("nomic-embed-text")
-        self.layout.addWidget(self.embeddingModelLabel)
-        self.layout.addWidget(self.embeddingModelEdit)
-
         # Save Button
         self.saveButton = QtWidgets.QPushButton("Save")
         self.layout.addWidget(self.saveButton)

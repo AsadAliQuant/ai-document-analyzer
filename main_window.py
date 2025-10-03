@@ -1,10 +1,27 @@
-from PyQt6.QtWidgets import QMainWindow, QFileDialog, QMessageBox, QSystemTrayIcon, QGroupBox, QVBoxLayout, QHBoxLayout, QTextBrowser, QLineEdit, QPushButton, QWidget, QComboBox, QLabel, QApplication, QGraphicsOpacityEffect, QFrame
 from PyQt6.QtCore import QPropertyAnimation, QEasingCurve, QThread, QObject, pyqtSignal, pyqtSlot, QTimer, Qt, QRect, QRectF, QMarginsF, QSize
+from PyQt6.QtGui import QIcon, QImage, QPainter, QPdfWriter, QPageSize, QTextDocument
+from PyQt6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QLabel,
+    QGroupBox,
+    QHBoxLayout,
+    QLineEdit,
+    QGraphicsOpacityEffect,
+    QMainWindow,
+    QMessageBox,
+    QPushButton,
+    QSystemTrayIcon,
+    QTextBrowser,
+    QVBoxLayout,
+    QWidget,
+)
 import json
 import re
 import os
 import shutil
 import math
+import hashlib
 from ui_main_window import Ui_MainWindow
 from settings_window import SettingsWindow
 from typing import Optional, List
@@ -59,8 +76,10 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self._init_in_progress = True
         
         # Show loading overlay immediately
+        self._keep_loading_message_constant = True
+        loading_text = "Loading AI Document Analyzer"
         self._create_loading_overlay()
-        self._show_loading_overlay("Initializing application")
+        self._show_loading_overlay(loading_text)
         
         # Disable all UI during loading
         self.setEnabled(False)
@@ -366,7 +385,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         }
 
         doc_key = ""
-        # Compute doc_key for both images and documents
+        # Compute doc_key for images/documents or pasted text
         if file_path:
             try:
                 doc_key = self.large_doc_manager.compute_document_key(file_path)
@@ -374,53 +393,32 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 doc_key = ""
             params["doc_key"] = doc_key
         else:
-            params["doc_key"] = ""
+            if input_text:
+                try:
+                    doc_key = self._compute_text_doc_key(input_text)
+                except Exception:
+                    doc_key = ""
+            params["doc_key"] = doc_key
 
-        # Handle both images and documents with RAG pipeline
-        if file_path and doc_key:
-            # Check if we need to process (images always use RAG now)
-            needs_processing = False
-            if is_image:
-                # Images always get OCR + RAG processing
-                needs_processing = True
-                has_store = bool(doc_key and self.large_doc_manager.has_vector_store(doc_key))
-                if has_store:
-                    needs_processing = False  # Already processed
-            elif self._is_large_document(file_path):
-                needs_processing = True
-                has_store = bool(doc_key and self.large_doc_manager.has_vector_store(doc_key))
-                if has_store:
-                    needs_processing = False  # Already processed
-            
-            if needs_processing:
+        # Handle images, documents, and pasted text with RAG pipeline (always process into vector store)
+        if (file_path or input_text) and doc_key:
+            has_store = bool(self.large_doc_manager.has_vector_store(doc_key))
+            if not has_store:
                 self._current_doc_key = doc_key
-                if is_image:
-                    # Prompt for OCR processing
-                    reply = QMessageBox.question(
-                        self,
-                        "Image OCR Processing",
-                        "This image will be processed using OCR and stored in vector database for enhanced Q&A.\n\nProceed?",
-                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
-                    )
-                    if reply != QMessageBox.StandardButton.Yes:
-                        return
-                else:
-                    # Large document prompt
-                    if not self._prompt_large_doc_processing():
-                        return
-                
                 self._pending_analysis_params = params
-                self._set_status("Processing with OCR..." if is_image else "Processing document...")
-                self._set_loading(True)
-                print(f"Starting {'image OCR' if is_image else 'large doc'} processing worker")
-                self._start_large_doc_processing(file_path, doc_key, is_image=is_image)
+                if file_path:
+                    self._set_status("Processing with OCR..." if is_image else "Processing document...")
+                    self._set_loading(True)
+                    print(f"Starting {'image OCR' if is_image else 'document'} processing worker")
+                    self._start_large_doc_processing(file_path, doc_key, is_image=is_image)
+                else:
+                    self._set_status("Processing pasted text...")
+                    self._set_loading(True)
+                    print("Starting pasted text processing worker")
+                    self._start_pasted_text_processing(doc_key, input_text)
                 return
-            
-            # Has vector store, use it
-            if doc_key and self.large_doc_manager.has_vector_store(doc_key):
-                self._qa_vector_doc_key = doc_key
-            else:
-                self._qa_vector_doc_key = ""
+            # Already processed; use existing vector store
+            self._qa_vector_doc_key = doc_key
         else:
             self._qa_vector_doc_key = ""
 
@@ -564,8 +562,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         title = "معالجة مستند كبير" if is_ar else "Large Document Processing"
         message = (
-            "هذا المستند كبير جداً. هل تريد تقسيمه إلى قطع وتخزينه في قاعدة بيانات المتجهات للمعالجة الأفضل؟\n\n"
-            "سيتم إنشاء تقرير الملخص من هذه القطع."
+            "هذا المستند كبير جداً. هل تريد تقسيمه إلى مقاطع وتخزينه في قاعدة بيانات المتجهات لتحسين المعالجة؟\n\n"
+            "سيتم إنشاء تقرير الملخص من هذه المقاطع."
             if is_ar else
             "This document is large. Would you like to split it into chunks and store in a vector database for better processing?\n\n"
             "The summary report will be created from these chunks."
@@ -576,6 +574,28 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             QMessageBox.StandardButton.Yes
         )
         return reply == QMessageBox.StandardButton.Yes
+
+    def _compute_text_doc_key(self, text: str) -> str:
+        """Compute a stable key for pasted text using MD5 of its content."""
+        raw = (text or "").strip()
+        try:
+            return hashlib.md5(raw.encode("utf-8"), usedforsecurity=False).hexdigest()
+        except TypeError:
+            # Fallback for Python versions without 'usedforsecurity'
+            return hashlib.md5(raw.encode("utf-8")).hexdigest()
+
+    def _start_pasted_text_processing(self, doc_key: str, text: str):
+        """Start background processing for pasted text with RAG chunking."""
+        self._processing_thread = QThread(self)
+        self._processing_worker = PastedTextProcessWorker(self, doc_key, text)
+        self._processing_worker.moveToThread(self._processing_thread)
+        self._processing_thread.started.connect(self._processing_worker.run)
+        self._processing_worker.finished.connect(self._on_large_doc_processing_finished)
+        self._processing_worker.error.connect(self._on_large_doc_processing_error)
+        self._processing_worker.finished.connect(self._processing_thread.quit)
+        self._processing_worker.finished.connect(self._processing_worker.deleteLater)
+        self._processing_thread.finished.connect(self._processing_thread.deleteLater)
+        self._processing_thread.start()
 
     def _start_large_doc_processing(self, file_path: str, doc_key: str, is_image: bool = False):
         """Start background processing for large documents or images with OCR."""
@@ -596,7 +616,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self._set_loading(False)
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         message = (
-            f"تم تقسيم المستند إلى {chunk_count} قطعة وتخزينها في قاعدة البيانات.\n\nجاري إنشاء التقرير..."
+            f"تم تقسيم المستند إلى {chunk_count} مقطعاً وتخزينها في قاعدة البيانات.\n\nجاري إنشاء التقرير..."
             if is_ar else
             f"Document split into {chunk_count} chunks and stored in database.\n\nGenerating report..."
         )
@@ -703,8 +723,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             self._current_lang = 'ar' if is_ar else 'en'
             self.setWindowTitle("محلل المستندات الذكي" if is_ar else "AI Document Analyzer")
             self.ui.newChatButton.setText("＋ تحليل جديد" if is_ar else "＋ New Analysis")
-            self.ui.availableModelLabel.setText("النموذج\u200F:" if is_ar else "Model:")
-            self.ui.modelSourceLabel.setText("المصدر\u200F:" if is_ar else "Source:")
+            self.ui.availableModelLabel.setText("النموذج:" if is_ar else "Model:")
+            self.ui.modelSourceLabel.setText("المصدر:" if is_ar else "Source:")
             self.ui.refreshModelsButton.setText("تحديث" if is_ar else "Refresh")
             self.ui.topSettingsButton.setText("الإعدادات" if is_ar else "Settings")
             self.ui.analyzeButton.setText("تحليل المستند" if is_ar else "Analyze Document")
@@ -1118,6 +1138,11 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             "Ollama server is not running": "خادم Ollama غير قيد التشغيل",
             "No models installed": "لا توجد نماذج مثبتة",
             "Failed to refresh models": "فشل في تحديث النماذج",
+            "Processing with OCR...": "جارٍ المعالجة عبر OCR...",
+            "Processing document...": "جارٍ معالجة المستند...",
+            "Processing pasted text...": "جارٍ معالجة النص الملصق...",
+            "Summary copied to clipboard": "تم نسخ الملخص إلى الحافظة",
+            "Exporting PDF...": "جارٍ تصدير PDF...",
         }
         if text in mapping:
             return mapping[text]
@@ -1256,56 +1281,16 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             )
         else:
             prompt = (
-                "You are an expert academic summarizer. You must return the summary in strict JSON format. "
-                "Summarize only the provided document text. Focus on key points, methods, and conclusions. No extra commentary.\n\n"
+                "You are an expert summarizer. You must return the summary in strict JSON format. "
+                "Summarize only the provided document text. Focus on key points, methods, and conclusions. No extra commentary. "
+                "You must always provide content for all three fields (key_points, methods, conclusions), even if the document does not explicitly contain them. "
+                "If necessary, infer plausible entries to ensure each field is filled.\n\n"
                 f"Document text:\n{input_text}\n\n"
                 "Return the summary in this JSON structure:\n"
                 f"{schema}\n\n"
-                "Return only valid JSON. Do not include code fences or any text outside JSON. Write the content in English."
+                "Return only valid JSON without code fences. Write the content in English."
             )
         result = ollama_client.generate(model=model, prompt=prompt, format='json', stream=False)
-        if isinstance(result, dict):
-            return result.get('response', '') or ''
-        # Support typed responses from newer clients
-        try:
-            resp = getattr(result, 'response', '')
-            if resp:
-                return resp
-        except Exception:
-            pass
-        return str(result)
-
-    def summarize_image_offline(self, model: str, file_path: str) -> str:
-        b64, _ = self._read_image_base64_and_mime(file_path)
-        schema = (
-            '{\n'
-            '  "summary": {\n'
-            '    "key_points": ["...", "..."],\n'
-            '    "methods": ["...", "..."],\n'
-            '    "conclusions": ["...", "..."]\n'
-            '  }\n'
-            '}'
-        )
-        is_ar = getattr(self, '_current_lang', 'en') == 'ar'
-        if is_ar:
-            prompt = (
-                "أنت مُلخِّص أكاديمي خبير. استخرج كل النص القابل للقراءة من الصورة المقدمة، "
-                "ثم لخّص ذلك النص فقط. يجب أن تُرجع الملخص بصيغة JSON صارمة. "
-                "ركّز على النقاط الرئيسية والأساليب والاستنتاجات. بدون أي تعليقات إضافية.\n\n"
-                "أعد الملخص بهذا الهيكل JSON:\n"
-                f"{schema}\n\n"
-                "أرجع JSON صالح فقط دون أي أسطر برمجية أو نص خارج JSON. اكتب المحتوى باللغة العربية."
-            )
-        else:
-            prompt = (
-                "You are an expert academic summarizer. Extract all legible text from the provided image, "
-                "then summarize only that extracted text. You must return the summary in strict JSON format. "
-                "Focus on key points, methods, and conclusions. No extra commentary.\n\n"
-                "Return the summary in this JSON structure:\n"
-                f"{schema}\n\n"
-                "Return only valid JSON. Do not include code fences or any text outside JSON. Write the content in English."
-            )
-        result = ollama_client.generate(model=model, prompt=prompt, images=[b64], format='json', stream=False)
         if isinstance(result, dict):
             return result.get('response', '') or ''
         # Support typed responses from newer clients
@@ -1329,12 +1314,14 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 "نص المستند:\n" + input_text + "\n\n" +
                 "أعد الملخص بهذا الهيكل JSON:\n" +
                 '{\n  "summary": {\n    "key_points": ["...", "..."],\n    "methods": ["...", "..."],\n    "conclusions": ["...", "..."]\n  }\n}\n\n' +
-                "أرجع JSON صالح فقط بدون أسطر برمجية. اكتب المحتوى باللغة العربية."
+                "أرجع JSON صالح فقط دون أي أسطر برمجية أو نص خارج JSON. اكتب المحتوى باللغة العربية."
             )
         else:
             sys_instr = (
-                "You are an expert academic summarizer. You must return the summary in strict JSON format. "
-                "Summarize only the provided document text. Focus on key points, methods, and conclusions. No extra commentary."
+                "You are an expert summarizer. You must return the summary in strict JSON format. "
+                "Summarize only the provided document text. Focus on key points, methods, and conclusions. No extra commentary. "
+                "You must always provide content for all three fields (key_points, methods, conclusions), even if the document does not explicitly contain them. "
+                "If necessary, infer plausible entries to ensure each field is filled."
             )
             user_prompt = (
                 "Document text:\n" + input_text + "\n\n" +
@@ -1344,37 +1331,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             )
         m = genai.GenerativeModel(model_name=model, system_instruction=sys_instr)  # type: ignore
         resp = m.generate_content([user_prompt])
-        return getattr(resp, 'text', None)
-
-    def summarize_image_gemini(self, model: str, file_path: str, api_key: str) -> Optional[str]:
-        genai.configure(api_key=api_key)  # type: ignore
-        is_ar = getattr(self, '_current_lang', 'en') == 'ar'
-        if is_ar:
-            sys_instr = (
-                "أنت مُلخِّص أكاديمي خبير. يجب أن تُرجع الملخص بصيغة JSON صارمة فقط. "
-                "لخّص النص المستخرج من الصورة فقط. ركّز على النقاط الرئيسية والأساليب والاستنتاجات. بدون أي تعليقات إضافية."
-            )
-            user_prompt = (
-                "استخرج النص من هذه الصورة ولخّص النص المستخرج فقط.\n\n"
-                "أعد الملخص بهذا الهيكل JSON:\n"
-                '{\n  "summary": {\n    "key_points": ["...", "..."],\n    "methods": ["...", "..."],\n    "conclusions": ["...", "..."]\n  }\n}\n\n'
-                "أرجع JSON صالح فقط بدون أسطر برمجية. اكتب المحتوى باللغة العربية."
-            )
-        else:
-            sys_instr = (
-                "You are an expert academic summarizer. You must return the summary in strict JSON format. "
-                "Summarize only the provided document text extracted from the image. Focus on key points, methods, and conclusions. No extra commentary."
-            )
-            user_prompt = (
-                "Extract the text from this image and summarize only that extracted text.\n\n"
-                "Return the summary in this JSON structure:\n"
-                '{\n  "summary": {\n    "key_points": ["...", "..."],\n    "methods": ["...", "..."],\n    "conclusions": ["...", "..."]\n  }\n}\n\n'
-                "Return only valid JSON without code fences. Write the content in English."
-            )
-        m = genai.GenerativeModel(model_name=model, system_instruction=sys_instr)  # type: ignore
-        b64, mime = self._read_image_base64_and_mime(file_path)
-        image_part = {"mime_type": mime, "data": base64.b64decode(b64)}
-        resp = m.generate_content([user_prompt, image_part])
         return getattr(resp, 'text', None)
 
     # --- JSON parsing and formatting helpers ---
@@ -1576,7 +1532,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         try:
             is_ar = getattr(self, "_current_lang", "en") == "ar"
             if is_ar:
-                # Arabic: "[File] تقرير ملخص المستند"
+                # Arabic: "تقرير ملخص المستند"
                 return f"تقرير ملخص المستند"
             return f"Document Summary Report"
         except Exception:
@@ -1625,13 +1581,15 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         if is_ar:
             system_prompt = (
-                "أنت مساعد ذكاء اصطناعي يقوم بتحليل مستند واحد مُقدَّم (نص عادي أو ملف PDF أو غيره) ويجيب فقط عن الأسئلة المتعلقة بمحتواه. "
-                "تعامل مع جميع أنواع الأسئلة مثل: هل فيه أي عنف في المستند؟، كم مرة انذكرت كلمة “___”؟، عن إيش يتكلم الحوار بين “الشخصية” و”الشخصية”؟، هل فيه كلام مسيء للقانون أو للوطن؟، هل فيه استهداف لقبيلة بكلام مباشر أو غير مباشر؟."
+                "أنت مساعد ذكاء اصطناعي يحلل مستنداً واحداً مُقدماً (نص عادي أو ملف PDF وغيرها) ويجيب فقط عن الأسئلة المتعلقة بمحتواه. "
+                "تعامَل مع جميع أنواع الأسئلة مثل: هل يتضمن المستند أي عنف؟ كم مرة تكررت الكلمة \"___\"؟ عمّ يتحدث الحوار بين \"الشخصية\" و\"الشخصية\"؟ هل يتضمن المستند أفكاراً أو ألفاظاً مسيئة للقانون أو للوطن؟ وهل يحتوي على كلمات تستهدف قبيلة؟ "
+                "تذكّر المحادثة السابقة مع المستخدم واستخدمها للسياق."
             )
         else:
             system_prompt = (
                 "You are an AI assistant that analyzes a single provided document (plain text, PDF, etc.) and answers only questions about its content. "
-                "Handle all types of questions such as: “Does the document include any form of violence?”, “How many times was the ‘word’ repeated?”, “What is the conversation about between ‘character A’ and ‘character B’?”, “Does the document include offensive ideas or words against the law or the country?”, and “Does it contain words targeting a tribe?”."
+                "Handle all types of questions such as: \"Does the document include any form of violence?\", \"How many times was the word repeated?\", \"What is the conversation about between character A and character B?\", \"Does the document include offensive ideas or words against the law or the country?\", and \"Does it contain words targeting a tribe?\" "
+                "Remember the previous conversation with the user and use it for context."
             )
         # Strictly use original document text only (no summary fallback)
         document_text = (input_text or "").strip()
@@ -1656,18 +1614,38 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         context_text = vector_context or document_text
         if not context_text:
             return "لا يوجد نص مستند متاح للأسئلة والأجوبة." if is_ar else "No document context available for Q&A."
-        # Extract the last user question from the messages
+        # Build conversation history
+        conversation_history = ""
+        if messages and len(messages) > 1:
+            history_lines = []
+            # Include all messages except the last user question (we'll add it separately)
+            for m in messages[:-1]:
+                role = m.get("role", "user")
+                content = m.get("content", "")
+                if role == "user":
+                    prefix = "المستخدم" if is_ar else "User"
+                else:
+                    prefix = "المساعد" if is_ar else "Assistant"
+                history_lines.append(f"{prefix}: {content}")
+            if history_lines:
+                conversation_history = "\n".join(history_lines)
+        
+        # Build the final prompt with conversation history
         if is_ar:
-            user_prompt = (
-                "مقاطع سياقية:\n" + context_text + "\n\n" +
-                "سؤال المستخدم:\n" + user_question + "\n\n" +
-                "أجب بالعربية اعتمادًا فقط على نص المستند. لا تضف معلومات خارجية."
+            user_prompt = "مقاطع سياقية:\n" + context_text + "\n\n"
+            if conversation_history:
+                user_prompt += "محادثة سابقة:\n" + conversation_history + "\n\n"
+            user_prompt += (
+                "سؤال المستخدم الحالي:\n" + user_question + "\n\n" +
+                "أجب بالعربية اعتماداً فقط على نص المستند والمحادثة السابقة. لا تُضِف معلومات خارجية."
             )
         else:
-            user_prompt = (
-                "Context passages:\n" + context_text + "\n\n" +
-                "User Question:\n" + user_question + "\n\n" +
-                "Answer strictly based on the document text only."
+            user_prompt = "Context passages:\n" + context_text + "\n\n"
+            if conversation_history:
+                user_prompt += "Previous conversation:\n" + conversation_history + "\n\n"
+            user_prompt += (
+                "Current User Question:\n" + user_question + "\n\n" +
+                "Answer strictly based on the document text and previous conversation only."
             )
         prompt = system_prompt + "\n\n" + user_prompt
         result = ollama_client.generate(model=model, prompt=prompt, stream=False)
@@ -1686,13 +1664,15 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         if is_ar:
             system_prompt = (
-                "أنت مساعد ذكاء اصطناعي يقوم بتحليل مستند واحد مُقدَّم (نص عادي أو ملف PDF أو غيره) ويجيب فقط عن الأسئلة المتعلقة بمحتواه. "
-                "تعامل مع جميع أنواع الأسئلة مثل: هل فيه أي عنف في المستند؟، كم مرة انذكرت كلمة “___”؟، عن إيش يتكلم الحوار بين “الشخصية” و”الشخصية”؟، هل فيه كلام مسيء للقانون أو للوطن؟، هل فيه استهداف لقبيلة بكلام مباشر أو غير مباشر؟."
+                "Ø£Ù†Øª Ù…Ø³Ø§Ø¹Ø¯ Ø°ÙƒØ§Ø¡ Ø§ØµØ·Ù†Ø§Ø¹ÙŠ ÙŠÙ‚ÙˆÙ… Ø¨ØªØ­Ù„ÙŠÙ„ Ù…Ø³ØªÙ†Ø¯ ÙˆØ§Ø­Ø¯ Ù…ÙÙ‚Ø¯ÙŽÙ‘Ù… (Ù†Øµ Ø¹Ø§Ø¯ÙŠ Ø£Ùˆ Ù…Ù„Ù PDF Ø£Ùˆ ØºÙŠØ±Ù‡) ÙˆÙŠØ¬ÙŠØ¨ ÙÙ‚Ø· Ø¹Ù† Ø§Ù„Ø£Ø³Ø¦Ù„Ø© Ø§Ù„Ù…ØªØ¹Ù„Ù‚Ø© Ø¨Ù…Ø­ØªÙˆØ§Ù‡. "
+                "ØªØ¹Ø§Ù…Ù„ Ù…Ø¹ Ø¬Ù…ÙŠØ¹ Ø£Ù†ÙˆØ§Ø¹ Ø§Ù„Ø£Ø³Ø¦Ù„Ø© Ù…Ø«Ù„: Ù‡Ù„ ÙÙŠÙ‡ Ø£ÙŠ Ø¹Ù†Ù ÙÙŠ Ø§Ù„Ù…Ø³ØªÙ†Ø¯ØŸØŒ ÙƒÙ… Ù…Ø±Ø© Ø§Ù†Ø°ÙƒØ±Øª ÙƒÙ„Ù…Ø© \"___\"ØŸØŒ Ø¹Ù† Ø¥ÙŠØ´ ÙŠØªÙƒÙ„Ù… Ø§Ù„Ø­ÙˆØ§Ø± Ø¨ÙŠÙ† \"Ø§Ù„Ø´Ø®ØµÙŠØ©\" Ùˆ\"Ø§Ù„Ø´Ø®ØµÙŠØ©\"ØŸØŒ Ù‡Ù„ ÙÙŠÙ‡ ÙƒÙ„Ø§Ù… Ù…Ø³ÙŠØ¡ Ù„Ù„Ù‚Ø§Ù†ÙˆÙ† Ø£Ùˆ Ù„Ù„ÙˆØ·Ù†ØŸØŒ Ù‡Ù„ ÙÙŠÙ‡ Ø§Ø³ØªÙ‡Ø¯Ø§Ù Ù„Ù‚Ø¨ÙŠÙ„Ø© Ø¨ÙƒÙ„Ø§Ù… Ù…Ø¨Ø§Ø´Ø± Ø£Ùˆ ØºÙŠØ± Ù…Ø¨Ø§Ø´Ø±ØŸ. "
+                "ØªØ°ÙƒØ± Ø§Ù„Ù…Ø­Ø§Ø¯Ø«Ø© Ø§Ù„Ø³Ø§Ø¨Ù‚Ø© Ù…Ø¹ Ø§Ù„Ù…Ø³ØªØ®Ø¯Ù… ÙˆØ§Ø³ØªØ®Ø¯Ù…Ù‡Ø§ Ù„Ù„Ø³ÙŠØ§Ù‚."
             )
         else:
             system_prompt = (
                 "You are an AI assistant that analyzes a single provided document (plain text, PDF, etc.) and answers only questions about its content. "
-                "Handle all types of questions such as: “Does the document include any form of violence?”, “How many times was the ‘word’ repeated?”, “What is the conversation about between ‘character A’ and ‘character B’?”, “Does the document include offensive ideas or words against the law or the country?”, and “Does it contain words targeting a tribe?”."
+                "Handle all types of questions such as: \"Does the document include any form of violence?\", \"How many times was the word repeated?\", \"What is the conversation about between character A and character B?\", \"Does the document include offensive ideas or words against the law or the country?\", and \"Does it contain words targeting a tribe?\" "
+                "Remember the previous conversation with the user and use it for context."
             )
         m = genai.GenerativeModel(model_name=model, system_instruction=system_prompt)  # type: ignore
         # Strictly use original document text only (no summary fallback)
@@ -1717,18 +1697,38 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 vector_context = "\n\n".join(collected)
         context_text = vector_context or document_text
         if not context_text:
-            return "لا يوجد نص مستند متاح للأسئلة والأجوبة." if is_ar else "No document context available for Q&A."
+            return "Ù„Ø§ ÙŠÙˆØ¬Ø¯ Ù†Øµ Ù…Ø³ØªÙ†Ø¯ Ù…ØªØ§Ø­ Ù„Ù„Ø£Ø³Ø¦Ù„Ø© ÙˆØ§Ù„Ø£Ø¬ÙˆØ¨Ø©." if is_ar else "No document context available for Q&A."
+        # Build conversation history
+        conversation_history = ""
+        if messages and len(messages) > 1:
+            history_lines = []
+            # Include all messages except the last user question
+            for msg in messages[:-1]:
+                role = msg.get("role", "user")
+                content_msg = msg.get("content", "")
+                if role == "user":
+                    prefix = "Ø§Ù„Ù…Ø³ØªØ®Ø¯Ù…" if is_ar else "User"
+                else:
+                    prefix = "Ø§Ù„Ù…Ø³Ø§Ø¹Ø¯" if is_ar else "Assistant"
+                history_lines.append(f"{prefix}: {content_msg}")
+            if history_lines:
+                conversation_history = "\n".join(history_lines)
+        
         if is_ar:
-            user_prompt = (
-                "مقاطع سياقية:\n" + context_text + "\n\n" +
-                "سؤال المستخدم:\n" + user_question + "\n\n" +
-                "أجب بالعربية اعتمادًا فقط على نص المستند. لا تضف معلومات خارجية."
+            user_prompt = "مقاطع سياقية:\n" + context_text + "\n\n"
+            if conversation_history:
+                user_prompt += "محادثة سابقة:\n" + conversation_history + "\n\n"
+            user_prompt += (
+                "سؤال المستخدم الحالي:\n" + user_question + "\n\n" +
+                "أجب بالعربية اعتماداً فقط على نص المستند والمحادثة السابقة. لا تُضِف معلومات خارجية."
             )
         else:
-            user_prompt = (
-                "Context passages:\n" + context_text + "\n\n" +
-                "User Question:\n" + user_question + "\n\n" +
-                "Answer strictly based on the document text only."
+            user_prompt = "Context passages:\n" + context_text + "\n\n"
+            if conversation_history:
+                user_prompt += "Previous conversation:\n" + conversation_history + "\n\n"
+            user_prompt += (
+                "Current User Question:\n" + user_question + "\n\n" +
+                "Answer strictly based on the document text and previous conversation only."
             )
         resp = m.generate_content([user_prompt])
         return getattr(resp, 'text', None)
@@ -1783,6 +1783,30 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             pass
         # Fallback to QSettings
         return self.settings_window.settings.value("GOOGLE_API_KEY", "", type=str)
+
+    def _get_online_summary_char_cap(self) -> int:
+        """Max characters for online summarization to respect free-tier limits.
+
+        Config key: ONLINE_SUMMARY_CHAR_CAP (int). Default: 12000
+        """
+        try:
+            data = self._read_config()
+            val = int(data.get("ONLINE_SUMMARY_CHAR_CAP", 12000))
+            return max(1000, val)
+        except Exception:
+            return 12000
+
+    def _get_offline_summary_char_cap(self) -> int:
+        """Optional cap for offline summarization. 0 or negative means unlimited.
+
+        Config key: OFFLINE_SUMMARY_CHAR_CAP (int). Default: 0 (unlimited)
+        """
+        try:
+            data = self._read_config()
+            val = int(data.get("OFFLINE_SUMMARY_CHAR_CAP", 0))
+            return max(0, val)
+        except Exception:
+            return 0
 
     def is_ollama_available(self) -> bool:
         return ollama_client is not None
@@ -1882,10 +1906,19 @@ class _AnalysisWorker(QObject):
             # Move potentially heavy file text extraction to the worker thread
             try:
                 if doc_key and self.window.large_doc_manager.has_vector_store(doc_key):
-                    # Use vector store context (for both documents and images with OCR)
-                    context = self.window.large_doc_manager.build_summary_context(doc_key)
-                    if context.strip():
-                        input_text = context
+                    # Prefer full raw text for offline; cap for online
+                    if provider == "ollama":
+                        full_text = self.window.large_doc_manager.read_full_text(doc_key)
+                        if full_text and full_text.strip():
+                            cap = self.window._get_offline_summary_char_cap()
+                            input_text = full_text if cap <= 0 else full_text[:cap]
+                        else:
+                            # Fallback to concatenated chunks with no cap
+                            input_text = self.window.large_doc_manager.build_summary_context(doc_key, max_chars=10**9)
+                    else:
+                        # Online models: keep within cap
+                        cap = self.window._get_online_summary_char_cap()
+                        input_text = self.window.large_doc_manager.build_summary_context(doc_key, max_chars=cap)
                 elif file_path and not (input_text or "").strip():
                     # Extract text from file (includes OCR for images)
                     if not os.path.exists(file_path):
@@ -2008,6 +2041,38 @@ class LargeDocProcessWorker(QObject):
             self.error.emit(error_msg)
 
 
+class PastedTextProcessWorker(QObject):
+    finished = pyqtSignal(str, int)
+    error = pyqtSignal(str)
+
+    def __init__(self, window: 'MainWindow', doc_key: str, text: str):
+        super().__init__()
+        self.window = window
+        self.doc_key = doc_key
+        self.text = text
+
+    @pyqtSlot()
+    def run(self):
+        print(f"PastedTextProcessWorker.run started for doc_key: {self.doc_key}")
+        try:
+            clean_text = (self.text or "").strip()
+            if not clean_text:
+                self.error.emit("Pasted text is empty.")
+                return
+            # Use a descriptive source label for metadata
+            source_label = f"pasted:{self.doc_key}"
+            chunk_count = self.window.large_doc_manager.prepare_document(
+                self.doc_key,
+                source_label,
+                clean_text,
+            )
+            print(f"PastedTextProcessWorker completed, chunks: {chunk_count}")
+            self.finished.emit(self.doc_key, chunk_count)
+        except Exception as e:
+            print(f"Exception in PastedTextProcessWorker: {e}")
+            self.error.emit(f"Processing failed: {str(e)}")
+
+
 class _RefreshWorker(QObject):
     finished = pyqtSignal(str, list, str)  # provider, items, message
     error = pyqtSignal(str)  # error message
@@ -2066,3 +2131,6 @@ class _ExportWorker(QObject):
             self.finished.emit(self.save_path)
         except Exception as e:
             self.error.emit(str(e))
+
+
+

@@ -63,6 +63,10 @@ class LargeDocumentManager:
     def backend_marker_path(self, doc_key: str) -> str:
         return os.path.join(self.doc_store_path(doc_key), "backend.json")
 
+    def raw_text_path(self, doc_key: str) -> str:
+        """Path to the raw extracted text file for a document."""
+        return os.path.join(self.doc_store_path(doc_key), "raw_extracted.txt")
+
     def has_vector_store(self, doc_key: str) -> bool:
         store_dir = self.doc_store_path(doc_key)
         if not os.path.isdir(store_dir):
@@ -241,6 +245,33 @@ class LargeDocumentManager:
                     qdrant_client.close()
                 except Exception:
                     pass
+
+    def read_full_text(self, doc_key: str) -> str:
+        """Return the full original text for a processed document.
+
+        Prefers the raw extracted text dump; falls back to concatenating chunks
+        if the raw file is missing.
+        """
+        try:
+            path = self.raw_text_path(doc_key)
+            if os.path.exists(path):
+                with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                    return f.read()
+        except Exception:
+            pass
+        # Fallback: join chunk contents
+        try:
+            chunks = self._read_chunks(doc_key)
+            if not chunks:
+                return ""
+            parts: List[str] = []
+            for entry in chunks:
+                content = (entry.get("content") or "").strip()
+                if content:
+                    parts.append(content)
+            return "\n\n".join(parts)
+        except Exception:
+            return ""
 
     # ------------------------------------------------------------------
     # Internal helpers
