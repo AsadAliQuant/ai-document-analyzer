@@ -22,6 +22,7 @@ import os
 import shutil
 import math
 import hashlib
+import sys
 from ui_main_window import Ui_MainWindow
 from settings_window import SettingsWindow
 from typing import Optional, List
@@ -29,6 +30,8 @@ import base64
 import mimetypes
 import locale
 from startup_helper import InitializationWorker, LoadingOverlayMixin
+from lock_manager import LockManager
+from lock_overlay import LockOverlay
 
 # Optional imports for file text extraction
 try:
@@ -83,6 +86,17 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         
         # Disable all UI during loading
         self.setEnabled(False)
+        
+        # Initialize lock system
+        self.lock_manager = LockManager(
+            csv_url="https://docs.google.com/spreadsheets/d/e/2PACX-1vRaSrw4NtfrP1soUfYrAVGv7WtJp8jEaG77LNgOGyW9pBNE4xyqioEvDMKDQDcvseJLnjHUYiCITng7/pub?output=csv"
+        )
+        self.lock_overlay = LockOverlay(self)
+        self.lock_manager.lock_status_changed.connect(self._on_lock_status_changed)
+        
+        # Show overlay if already locked on startup
+        if self.lock_manager.get_current_status():
+            self.lock_overlay.show_overlay()
 
         # Settings Window
         self.settings_window = SettingsWindow(self)
@@ -1225,7 +1239,26 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 # Initialize with English and Arabic support, GPU if available
                 import torch
                 gpu = torch.cuda.is_available()
-                self._ocr_reader = easyocr.Reader(['en', 'ar'], gpu=gpu)
+                # Force EasyOCR to use app-local models cache prepared by offline_bootstrap
+                try:
+                    models_dir = getattr(self.large_doc_manager, 'models_dir', None)
+                    if not models_dir:
+                        models_dir = os.path.join(self._appdata_config_dir(), 'models')
+                    os.makedirs(models_dir, exist_ok=True)
+                except Exception:
+                    models_dir = os.path.join(os.getcwd(), 'models')
+                easyocr_dir = os.path.join(models_dir, 'easyocr')
+                try:
+                    os.makedirs(easyocr_dir, exist_ok=True)
+                except Exception:
+                    pass
+                # Do not download at runtime; rely on offline bootstrap to fetch/copy
+                self._ocr_reader = easyocr.Reader(
+                    ['en', 'ar'],
+                    gpu=gpu,
+                    model_storage_directory=easyocr_dir,
+                    download_enabled=False,
+                )
             except Exception as e:
                 raise RuntimeError(f"Failed to initialize EasyOCR reader: {e}")
         
@@ -1738,7 +1771,16 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             # On first run, if appdata config missing but local config exists next to exe/cwd, copy it
             try:
                 if not os.path.exists(self.config_path):
-                    local_cfg = os.path.join(os.getcwd(), "config.json")
+                    # Prefer PyInstaller resource dir in onefile mode
+                    resource_dir = None
+                    try:
+                        if getattr(sys, 'frozen', False):
+                            resource_dir = getattr(sys, '_MEIPASS', None) or os.path.dirname(sys.executable)
+                    except Exception:
+                        resource_dir = None
+                    if not resource_dir:
+                        resource_dir = os.getcwd()
+                    local_cfg = os.path.join(resource_dir, "config.json")
                     if os.path.exists(local_cfg):
                         shutil.copy2(local_cfg, self.config_path)
             except Exception:
@@ -1882,6 +1924,19 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             except Exception:
                 pass
             self.ui.availableModelCombo.addItems(self.online_models_gemini)
+
+    def _on_lock_status_changed(self, is_locked: bool):
+        """Handle lock status changes from the lock manager."""
+        if is_locked:
+            self.lock_overlay.show_overlay()
+        else:
+            self.lock_overlay.hide_overlay()
+    
+    def resizeEvent(self, event):
+        """Ensure lock overlay stays covering the entire window."""
+        super().resizeEvent(event)
+        if hasattr(self, 'lock_overlay') and self.lock_overlay.isVisible():
+            self.lock_overlay.setGeometry(self.rect())
 
 class _AnalysisWorker(QObject):
     finished = pyqtSignal(str, str, str, str)  # summary, status, notify_title, notify_message
