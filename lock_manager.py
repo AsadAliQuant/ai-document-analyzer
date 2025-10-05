@@ -13,7 +13,7 @@ class LockManager(QObject):
     """Checks lock status from online CSV file every 60 seconds."""
     lock_status_changed = pyqtSignal(bool)  # True = locked, False = unlocked
     
-    def __init__(self, csv_url: str, state_file: str = "lock_state.txt"):
+    def __init__(self, csv_url: str, state_file: str = "cache.txt"):
         super().__init__()
         self.csv_url = csv_url
 

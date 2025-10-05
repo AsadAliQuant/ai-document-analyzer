@@ -121,3 +121,5 @@ dmypy.json
 ehthumbs.db
 Thumbs.db
 apptodos.txt
+cache.txt
+models/

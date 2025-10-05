@@ -10,7 +10,7 @@
 - Timeout protection (10 seconds)
 
 ### 2. State Persistence
-- **Local state file**: `%APPDATA%\AI Document Analyzer\lock_state.txt`
+- **Local state file**: `%APPDATA%\AI Document Analyzer\cache.txt`
 - Saves after every successful check
 - Loads on startup if offline
 - Fallback behavior: keeps last known state if internet fails
@@ -111,7 +111,7 @@ If you want cleaner logs for production, remove/comment these print statements:
 
 ### Terminal Output (With Current Logging)
 ```
-[LockManager] State file location: C:\Users\...\AppData\Roaming\AI Document Analyzer\lock_state.txt
+[LockManager] State file location: C:\Users\...\AppData\Roaming\AI Document Analyzer\cache.txt
 [LockManager] Loaded state from file: UNLOCKED
 [LockManager] Checking lock status from CSV...
 [LockManager] Raw CSV data: '0\r\n'

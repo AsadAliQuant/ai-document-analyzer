@@ -56,15 +56,27 @@ if exist "%BUILD_DIR%" rmdir /S /Q "%BUILD_DIR%"
 if exist "%SPEC_FILE%" del /Q "%SPEC_FILE%"
 
 REM ------------------------------------------------------------
-REM Build (ONEDIR for reliability and faster startup)
+REM Prefetch offline models into ./models if missing
+REM ------------------------------------------------------------
+set MODELS_OK=0
+if exist "models\sentence-transformers\all-MiniLM-L6-v2\config.json" set MODELS_OK=1
+if exist "models\easyocr" set MODELS_OK=1
+if %MODELS_OK%==0 (
+  echo Prefetching offline models into .\models ...
+  "%PYEXE%" offline_bootstrap.py --prefetch --target models
+)
+
+REM ------------------------------------------------------------
+REM Build (ONEFILE to produce a single EXE)
 REM ------------------------------------------------------------
 echo Building %APP_NAME% executable...
-"%PYEXE%" -m PyInstaller --noconfirm --clean --onedir ^
+"%PYEXE%" -m PyInstaller --noconfirm --clean --onefile ^
   --name "%APP_NAME%" ^
   %ICON_OPT% ^
   --add-data "assets;assets" ^
   --add-data "styles.qss;." ^
   --add-data "config.json;." ^
+  --add-data "models;models" ^
   --collect-all PyQt6 ^
   --collect-all sentence_transformers ^
   --collect-all transformers ^
@@ -75,8 +87,10 @@ echo Building %APP_NAME% executable...
   --collect-all qdrant_client ^
   --collect-all easyocr ^
   --collect-all PIL ^
+  --collect-all cv2 ^
   --collect-submodules langchain_community.vectorstores ^
   --collect-submodules langchain_huggingface ^
+  --hidden-import offline_bootstrap ^
   --hidden-import qdrant_client ^
   --hidden-import qdrant_client.models ^
   --hidden-import sqlite3 ^
@@ -98,11 +112,10 @@ if %ERRORLEVEL% NEQ 0 (
 
 echo.
 echo Build complete.
-echo Run the app here:
-echo   %DIST_DIR%\%APP_NAME%\%APP_NAME%.exe
+echo Single-file EXE created:
+echo   %DIST_DIR%\%APP_NAME%.exe
 echo.
-echo To move to another Windows PC, copy the entire folder:
-echo   %DIST_DIR%\%APP_NAME%\
+echo You can copy this single EXE to another Windows PC and run it directly.
 
 popd
 endlocal

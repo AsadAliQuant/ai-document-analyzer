@@ -17,7 +17,7 @@ A simple remote lock system that allows you to remotely disable the application 
    - Changes take effect within 60 seconds
 
 3. **Offline Behavior**
-   - The app stores the last known state locally in `lock_state.txt`
+   - The app stores the last known state locally in `cache.txt`
    - If the client goes offline, the app continues using the last known state
    - When online again, it will check for updates every 60 seconds
 
@@ -32,7 +32,7 @@ A simple remote lock system that allows you to remotely disable the application 
 
 - **lock_manager.py**: Handles CSV checking and state management
 - **lock_overlay.py**: Creates the blocking overlay widget
-- **lock_state.txt**: Stores the last known lock state (auto-generated)
+- **cache.txt**: Stores the last known lock state (auto-generated)
 
 ## Testing
 

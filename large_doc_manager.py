@@ -30,6 +30,9 @@ class LargeDocumentManager:
         self.base_dir = base_dir
         self.vector_base_dir = os.path.join(self.base_dir, "vector_store")
         os.makedirs(self.vector_base_dir, exist_ok=True)
+        # Local cache directory for ML models (embeddings, OCR, etc.)
+        self.models_dir = os.path.join(self.base_dir, "models")
+        os.makedirs(self.models_dir, exist_ok=True)
         if not _qdrant_available:
             raise RuntimeError(
                 "Qdrant is not available. Install 'qdrant-client' to enable vector storage."
@@ -217,7 +220,7 @@ class LargeDocumentManager:
                 break
         return "\n\n".join(collected)
 
-    def retrieve_context(self, doc_key: str, query: str, k: int = 15) -> List[Document]:
+    def retrieve_context(self, doc_key: str, query: str, k: int = 25) -> List[Document]:
         store_dir = self.doc_store_path(doc_key)
         qdrant_dir = os.path.join(store_dir, "qdrant_db")
         
@@ -284,7 +287,12 @@ class LargeDocumentManager:
                 model_kwargs = {"device": "cuda"}
         except Exception:
             pass
-        return HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2", model_kwargs=model_kwargs)
+        # Force cache to app-specific models dir so we can bundle/copy for offline use
+        return HuggingFaceEmbeddings(
+            model_name="sentence-transformers/all-MiniLM-L6-v2",
+            cache_folder=self.models_dir,
+            model_kwargs=model_kwargs,
+        )
 
 
     def _write_backend_marker(self, store_dir: str, backend: str) -> None:

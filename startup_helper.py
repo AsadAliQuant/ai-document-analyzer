@@ -27,6 +27,15 @@ class InitializationWorker(QObject):
             from large_doc_manager import LargeDocumentManager
             self.window.large_doc_manager = LargeDocumentManager(self.window.app_config_dir)
             
+            # Step 2.1: Prepare offline assets (HF embeddings cache, EasyOCR weights)
+            try:
+                self.progress.emit("Preparing offline models")
+                from offline_bootstrap import prepare_offline_assets
+                prepare_offline_assets(self.window.large_doc_manager.models_dir)
+            except Exception as e:
+                # Non-fatal; app can still operate, but OCR/embeddings may download later if online
+                print(f"Offline bootstrap warning: {e}")
+
             # Step 3: Initialize state variables
             self.progress.emit("Initializing state")
             self.window._qa_vector_doc_key = ""
@@ -37,7 +46,13 @@ class InitializationWorker(QObject):
             
             # Step 4: Set up model list
             self.progress.emit("Loading models")
-            self.window.online_models_gemini = ["gemini-2.5-flash"]
+            self.window.online_models_gemini = [
+                "gemini-2.5-flash",
+                "gemini-flash-lite-latest",
+                "gemini-flash-latest",
+                "gemini-2.5-pro",
+                "gemini-2.5-flash-lite",
+            ]    
             
             # Step 5/6: Defer any UI population and model refresh to main thread
             self.progress.emit("Loading available models")
