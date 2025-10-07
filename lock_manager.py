@@ -36,10 +36,10 @@ class LockManager(QObject):
         # Load last known state
         self._load_local_state()
         
-        # Setup timer to check every 6 seconds (change to 60000 for production)
+        # Setup timer to check every 60 seconds (change to 60000 for production)
         self.timer = QTimer(self)  # Parent is important for Qt objects
         self.timer.timeout.connect(self._check_lock_status)
-        self.timer.start(60000)  # 60 seconds for testing (use 60000 for 60 seconds in production)
+        self.timer.start(300000)  # 60 seconds for testing (use 60000 for 60 seconds in production)
         
         # Check immediately on startup
         self._check_lock_status()

@@ -524,6 +524,166 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             lines.append(f"{prefix}: {content}")
         return "\n".join(lines)
 
+    def _classify_question_type(self, question: str, provider: str, model: str, gemini_key: str = "") -> str:
+        """
+        Classify if a question is asking for counting word occurrences.
+        Returns "COUNT" for counting questions, "OTHER" for everything else.
+        """
+        if not question.strip():
+            return "OTHER"
+        
+        # Classification prompt
+        classification_prompt = (
+            "You are a classifier that determines if a question is asking to count word or phrase occurrences in a document.\n\n"
+            "Examples of COUNT questions:\n"
+            "- How many times does the word 'energy' appear?\n"
+            "- Count the occurrences of 'artificial intelligence'\n"
+            "- Number of times 'AI' is mentioned\n"
+            "- How often is 'machine learning' used?\n"
+            "- Count instances of the phrase 'data science'\n\n"
+            "Examples of OTHER questions:\n"
+            "- What is the main topic of this document?\n"
+            "- Summarize the key points\n"
+            "- What does the author think about AI?\n"
+            "- Explain the methodology used\n\n"
+            f"Question: \"{question}\"\n\n"
+            "Answer with only one word: COUNT or OTHER"
+        )
+        
+        try:
+            if provider == "ollama":
+                if not ollama_client:
+                    return "OTHER"
+                result = ollama_client.generate(model=model, prompt=classification_prompt, stream=False)
+                if isinstance(result, dict):
+                    response = result.get('response', '').strip().upper()
+                else:
+                    response = str(getattr(result, 'response', '')).strip().upper()
+            elif provider == "gemini":
+                if not genai or not gemini_key:
+                    return "OTHER"
+                genai.configure(api_key=gemini_key)
+                m = genai.GenerativeModel(model_name=model)
+                resp = m.generate_content([classification_prompt])
+                response = getattr(resp, 'text', '').strip().upper()
+            else:
+                return "OTHER"
+            
+            # Extract COUNT or OTHER from response
+            if "COUNT" in response:
+                return "COUNT"
+            else:
+                return "OTHER"
+                
+        except Exception as e:
+            print(f"Classification error: {e}")
+            return "OTHER"
+
+    def _extract_counting_target(self, question: str) -> str:
+        """
+        Extract the word or phrase to count from a counting question.
+        Uses simple heuristics to find quoted text or common patterns.
+        """
+        import re
+        
+        # Look for quoted text first
+        quoted_matches = re.findall(r'["\']([^"\']+)["\']', question)
+        if quoted_matches:
+            return quoted_matches[0]
+        
+        # Look for common patterns like "word X" or "phrase Y"
+        patterns = [
+            r'(?:word|term)\s+["\']?([^"\'?\s]+)["\']?',
+            r'(?:phrase)\s+["\']?([^"\'?]+)["\']?',
+            r'(?:occurrences? of)\s+["\']?([^"\'?]+)["\']?',
+            r'(?:times (?:does|is))\s+["\']?([^"\'?]+)["\']?',
+            r'(?:mentions? of)\s+["\']?([^"\'?]+)["\']?'
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, question, re.IGNORECASE)
+            if matches:
+                return matches[0].strip()
+        
+        # Fallback: look for capitalized words or common terms
+        words = question.split()
+        for i, word in enumerate(words):
+            if word.lower() in ['how', 'many', 'times', 'count', 'occurrences', 'mentions']:
+                # Look for the next meaningful word
+                for j in range(i+1, min(i+4, len(words))):
+                    candidate = words[j].strip('.,!?')
+                    if len(candidate) > 2 and candidate.lower() not in ['the', 'is', 'are', 'does', 'appear', 'mentioned']:
+                        return candidate
+        
+        return ""
+
+    def _count_word_occurrences(self, text: str, target: str, case_sensitive: bool = False) -> int:
+        """
+        Count exact occurrences of a word or phrase in text.
+        Supports both word boundaries and phrase matching.
+        """
+        if not text or not target:
+            return 0
+        
+        import re
+        
+        # Prepare text and target for comparison
+        search_text = text if case_sensitive else text.lower()
+        search_target = target if case_sensitive else target.lower()
+        
+        # If target is a single word, use word boundaries for exact matching
+        if ' ' not in search_target.strip():
+            # Single word - use word boundaries
+            pattern = r'\b' + re.escape(search_target) + r'\b'
+            matches = re.findall(pattern, search_text)
+            return len(matches)
+        else:
+            # Phrase - count overlapping occurrences
+            count = 0
+            start = 0
+            while True:
+                pos = search_text.find(search_target, start)
+                if pos == -1:
+                    break
+                count += 1
+                start = pos + 1
+            return count
+
+    def _handle_counting_question(self, question: str, doc_key: str = "") -> str:
+        """
+        Handle a counting question by extracting the target and counting occurrences.
+        """
+        # Extract what to count
+        target = self._extract_counting_target(question)
+        if not target:
+            is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+            return "لم أتمكن من تحديد الكلمة أو العبارة المراد عدها من السؤال." if is_ar else "Could not identify the word or phrase to count from your question."
+        
+        # Get full document text
+        full_text = ""
+        if doc_key and self.large_doc_manager.has_vector_store(doc_key):
+            try:
+                full_text = self.large_doc_manager.read_full_text(doc_key)
+            except Exception:
+                pass
+        
+        if not full_text and hasattr(self, '_qa_document_text'):
+            full_text = self._qa_document_text or ""
+        
+        if not full_text:
+            is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+            return "لا يوجد نص مستند متاح للعد." if is_ar else "No document text available for counting."
+        
+        # Count occurrences
+        count = self._count_word_occurrences(full_text, target, case_sensitive=False)
+        
+        # Format response
+        is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+        if is_ar:
+            return f"تم العثور على \"{target}\" {count} مرة في المستند."
+        else:
+            return f"The word/phrase \"{target}\" appears {count} times in the document."
+
     def _set_qa_controls_enabled(self, enabled: bool):
         self.ui.sendQuestionButton.setEnabled(enabled)
         self.ui.questionLineEdit.setEnabled(enabled)
@@ -672,13 +832,38 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self.ui.questionLineEdit.clear()
         self._set_qa_controls_enabled(False)
         self._start_qa_typing_indicator()
+
+        # Classify the question type before proceeding
+        provider_type = "ollama" if provider.startswith("Offline") else ("gemini" if "Gemini" in provider else "")
+        gemini_key = self._get_gemini_key() if "Gemini" in provider else ""
+        
+        try:
+            question_type = self._classify_question_type(question, provider_type, model, gemini_key)
+            
+            # Handle counting questions directly
+            if question_type == "COUNT":
+                try:
+                    count_result = self._handle_counting_question(question, self._qa_vector_doc_key)
+                    self._append_chat("Assistant", count_result)
+                    self._append_history("assistant", count_result)
+                    self._set_qa_controls_enabled(True)
+                    self._stop_qa_typing_indicator()
+                    return
+                except Exception as e:
+                    print(f"Counting error: {e}")
+                    # Fall back to normal RAG processing if counting fails
+        except Exception as e:
+            print(f"Classification error: {e}")
+            # Fall back to normal RAG processing if classification fails
+
+        # Continue with normal RAG processing for non-counting questions
         params = {
-            "provider": "ollama" if provider.startswith("Offline") else ("gemini" if "Gemini" in provider else ""),
+            "provider": provider_type,
             "model": model,
             "messages": list(self._qa_messages),
             "summary": self._last_summary_text,
             "input_text": (self._qa_document_text or self._last_input_text_for_qa) if include_input else "",
-            "gemini_key": self._get_gemini_key() if "Gemini" in provider else "",
+            "gemini_key": gemini_key,
             "doc_key": self._qa_vector_doc_key,
         }
 
