@@ -105,6 +105,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self._last_status_text = "Ready"
         # Default typing label base
         self._typing_label_base = "Assistant is typing"
+        self._offline_state: dict = {}
 
         # System tray icon for notifications
         self.tray_icon = None
@@ -176,17 +177,23 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         except Exception:
             pass
         self.config_path = os.path.join(self.app_config_dir, "config.json")
+        self.offline_state_path = os.path.join(self.app_config_dir, "offline_state.json")
+        self._offline_state = self._load_offline_state()
+        self._apply_offline_state_to_settings()
+
         # Defer heavy initialization to background thread
         self._init_thread = QThread(self)
         self._init_worker = InitializationWorker(self)
         self._init_worker.moveToThread(self._init_thread)
         self._init_thread.started.connect(self._init_worker.run)
         self._init_worker.progress.connect(self._on_init_progress)
+        self._init_worker.offline_progress.connect(self._on_offline_progress)
+        self._init_worker.offline_state_ready.connect(self._on_offline_state_ready)
         self._init_worker.finished.connect(self._on_init_finished)
         self._init_worker.finished.connect(self._init_thread.quit)
         self._init_worker.finished.connect(self._init_worker.deleteLater)
         self._init_thread.finished.connect(self._init_thread.deleteLater)
-        
+
         # Start initialization in background after a short delay (allow UI to paint)
         QTimer.singleShot(100, self._init_thread.start)
 
@@ -275,6 +282,26 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             return os.path.join(appdata, "AI Document Analyzer")
         except Exception:
             return os.getcwd()
+
+    def _load_offline_state(self) -> dict:
+        path = getattr(self, "offline_state_path", "")
+        if path and os.path.exists(path):
+            try:
+                with open(path, "r", encoding="utf-8") as fh:
+                    data = json.load(fh)
+                if isinstance(data, dict):
+                    return data
+            except Exception:
+                pass
+        return {}
+
+    def _apply_offline_state_to_settings(self) -> None:
+        state = getattr(self, "_offline_state", {}) or {}
+        try:
+            if hasattr(self, "settings_window") and hasattr(self.settings_window, "apply_offline_state"):
+                self.settings_window.apply_offline_state(state)
+        except Exception:
+            pass
 
     def copy_summary_to_clipboard(self):
         text = self.ui.summaryTextEdit.toPlainText() if hasattr(self.ui, 'summaryTextEdit') else ""
@@ -1032,6 +1059,10 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 pass
             return
         self._settings_open = True
+        try:
+            self.settings_window.apply_offline_state(self._offline_state)
+        except Exception:
+            pass
         self._set_settings_buttons_enabled(False)
         self.settings_window.show()
         self.settings_window.finished.connect(self.on_settings_closed)
@@ -1050,6 +1081,27 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 self.ui.topSettingsButton.setEnabled(enabled)
         except Exception:
             pass
+
+    @pyqtSlot(float, str)
+    def _on_offline_progress(self, percent: float, message: str):
+        try:
+            self.settings_window.apply_offline_progress(percent, message)
+        except Exception:
+            pass
+        if isinstance(self._offline_state, dict):
+            self._offline_state["progress"] = percent
+
+    @pyqtSlot(dict)
+    def _on_offline_state_ready(self, state: dict):
+        if not isinstance(state, dict):
+            state = {}
+        self._offline_state = state
+        try:
+            self.settings_window.apply_offline_state(self._offline_state)
+        except Exception:
+            pass
+        if self._offline_state.get("offline_ready"):
+            self._set_status("READY for Offline use")
 
     def export_pdf(self):
         text = self.ui.summaryTextEdit.toPlainText() if hasattr(self.ui, 'summaryTextEdit') else ""
@@ -1882,9 +1934,9 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         if is_ar:
             system_prompt = (
-                "Ø£Ù†Øª Ù…Ø³Ø§Ø¹Ø¯ Ø°ÙƒØ§Ø¡ Ø§ØµØ·Ù†Ø§Ø¹ÙŠ ÙŠÙ‚ÙˆÙ… Ø¨ØªØ­Ù„ÙŠÙ„ Ù…Ø³ØªÙ†Ø¯ ÙˆØ§Ø­Ø¯ Ù…ÙÙ‚Ø¯ÙŽÙ‘Ù… (Ù†Øµ Ø¹Ø§Ø¯ÙŠ Ø£Ùˆ Ù…Ù„Ù PDF Ø£Ùˆ ØºÙŠØ±Ù‡) ÙˆÙŠØ¬ÙŠØ¨ ÙÙ‚Ø· Ø¹Ù† Ø§Ù„Ø£Ø³Ø¦Ù„Ø© Ø§Ù„Ù…ØªØ¹Ù„Ù‚Ø© Ø¨Ù…Ø­ØªÙˆØ§Ù‡. "
-                "ØªØ¹Ø§Ù…Ù„ Ù…Ø¹ Ø¬Ù…ÙŠØ¹ Ø£Ù†ÙˆØ§Ø¹ Ø§Ù„Ø£Ø³Ø¦Ù„Ø© Ù…Ø«Ù„: Ù‡Ù„ ÙÙŠÙ‡ Ø£ÙŠ Ø¹Ù†Ù ÙÙŠ Ø§Ù„Ù…Ø³ØªÙ†Ø¯ØŸØŒ ÙƒÙ… Ù…Ø±Ø© Ø§Ù†Ø°ÙƒØ±Øª ÙƒÙ„Ù…Ø© \"___\"ØŸØŒ Ø¹Ù† Ø¥ÙŠØ´ ÙŠØªÙƒÙ„Ù… Ø§Ù„Ø­ÙˆØ§Ø± Ø¨ÙŠÙ† \"Ø§Ù„Ø´Ø®ØµÙŠØ©\" Ùˆ\"Ø§Ù„Ø´Ø®ØµÙŠØ©\"ØŸØŒ Ù‡Ù„ ÙÙŠÙ‡ ÙƒÙ„Ø§Ù… Ù…Ø³ÙŠØ¡ Ù„Ù„Ù‚Ø§Ù†ÙˆÙ† Ø£Ùˆ Ù„Ù„ÙˆØ·Ù†ØŸØŒ Ù‡Ù„ ÙÙŠÙ‡ Ø§Ø³ØªÙ‡Ø¯Ø§Ù Ù„Ù‚Ø¨ÙŠÙ„Ø© Ø¨ÙƒÙ„Ø§Ù… Ù…Ø¨Ø§Ø´Ø± Ø£Ùˆ ØºÙŠØ± Ù…Ø¨Ø§Ø´Ø±ØŸ. "
-                "ØªØ°ÙƒØ± Ø§Ù„Ù…Ø­Ø§Ø¯Ø«Ø© Ø§Ù„Ø³Ø§Ø¨Ù‚Ø© Ù…Ø¹ Ø§Ù„Ù…Ø³ØªØ®Ø¯Ù… ÙˆØ§Ø³ØªØ®Ø¯Ù…Ù‡Ø§ Ù„Ù„Ø³ÙŠØ§Ù‚."
+                "أنت مساعد ذكاء اصطناعي يحلل مستنداً واحداً مُقدماً (نص عادي أو ملف PDF وغيرها) ويجيب فقط عن الأسئلة المتعلقة بمحتواه. "
+                "تعامَل مع جميع أنواع الأسئلة مثل: هل يتضمن المستند أي عنف؟ كم مرة تكررت الكلمة \"___\"؟ عمّ يتحدث الحوار بين \"الشخصية\" و\"الشخصية\"؟ هل يتضمن المستند أفكاراً أو ألفاظاً مسيئة للقانون أو للوطن؟ وهل يحتوي على كلمات تستهدف قبيلة؟ "
+                "تذكّر المحادثة السابقة مع المستخدم واستخدمها للسياق."
             )
         else:
             system_prompt = (
@@ -1915,7 +1967,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 vector_context = "\n\n".join(collected)
         context_text = vector_context or document_text
         if not context_text:
-            return "Ù„Ø§ ÙŠÙˆØ¬Ø¯ Ù†Øµ Ù…Ø³ØªÙ†Ø¯ Ù…ØªØ§Ø­ Ù„Ù„Ø£Ø³Ø¦Ù„Ø© ÙˆØ§Ù„Ø£Ø¬ÙˆØ¨Ø©." if is_ar else "No document context available for Q&A."
+            return "لا يوجد نص مستند متاح للأسئلة والأجوبة." if is_ar else "No document context available for Q&A."
         # Build conversation history
         conversation_history = ""
         if messages and len(messages) > 1:
@@ -1925,9 +1977,9 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 role = msg.get("role", "user")
                 content_msg = msg.get("content", "")
                 if role == "user":
-                    prefix = "Ø§Ù„Ù…Ø³ØªØ®Ø¯Ù…" if is_ar else "User"
+                    prefix = "المستخدم" if is_ar else "User"
                 else:
-                    prefix = "Ø§Ù„Ù…Ø³Ø§Ø¹Ø¯" if is_ar else "Assistant"
+                    prefix = "المساعد" if is_ar else "Assistant"
                 history_lines.append(f"{prefix}: {content_msg}")
             if history_lines:
                 conversation_history = "\n".join(history_lines)

@@ -9,6 +9,8 @@ class InitializationWorker(QObject):
     """Worker thread for heavy initialization tasks."""
     progress = pyqtSignal(str)
     finished = pyqtSignal()
+    offline_progress = pyqtSignal(float, str)
+    offline_state_ready = pyqtSignal(dict)
     
     def __init__(self, window):
         super().__init__()
@@ -31,7 +33,16 @@ class InitializationWorker(QObject):
             try:
                 self.progress.emit("Preparing offline models")
                 from offline_bootstrap import prepare_offline_assets
-                prepare_offline_assets(self.window.large_doc_manager.models_dir)
+
+                def _progress_callback(percent: float, message: str) -> None:
+                    self.offline_progress.emit(percent, message)
+
+                state = prepare_offline_assets(
+                    self.window.large_doc_manager.models_dir,
+                    state_path=getattr(self.window, "offline_state_path", None),
+                    progress_callback=_progress_callback,
+                )
+                self.offline_state_ready.emit(state)
             except Exception as e:
                 # Non-fatal; app can still operate, but OCR/embeddings may download later if online
                 print(f"Offline bootstrap warning: {e}")

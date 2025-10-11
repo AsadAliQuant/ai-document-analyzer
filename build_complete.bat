@@ -71,6 +71,7 @@ REM Build (ONEFILE to produce a single EXE)
 REM ------------------------------------------------------------
 echo Building %APP_NAME% executable...
 "%PYEXE%" -m PyInstaller --noconfirm --clean --onefile ^
+  --windowed ^
   --name "%APP_NAME%" ^
   %ICON_OPT% ^
   --add-data "assets;assets" ^
