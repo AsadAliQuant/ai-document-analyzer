@@ -632,16 +632,45 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             if matches:
                 return matches[0].strip()
         
-        # Fallback: look for capitalized words or common terms
+        # Fallback: look for the next meaningful word (skip filler/stop words)
         words = question.split()
         for i, word in enumerate(words):
             if word.lower() in ['how', 'many', 'times', 'count', 'occurrences', 'mentions']:
                 # Look for the next meaningful word
                 for j in range(i+1, min(i+4, len(words))):
-                    candidate = words[j].strip('.,!?')
-                    if len(candidate) > 2 and candidate.lower() not in ['the', 'is', 'are', 'does', 'appear', 'mentioned']:
+                    candidate = words[j].strip('.,!?"\'()[]{}')
+                    stop = {
+                        'the','is','are','does','do','did','appear','appears','appeared','mentioned','mention',
+                        'many','much','number','of','in','on','at','to','from','a','an','this','that','these','those',
+                        'document','file','text','words','word','lines','line','verses','verse','poetry','sentences','sentence',
+                    }
+                    if len(candidate) > 2 and candidate.lower() not in stop:
                         return candidate
         
+        return ""
+
+    def _detect_structural_count(self, question: str) -> str:
+        """
+        Detect if the question asks to count structural units like lines, verses, paragraphs,
+        sentences, words, or characters.
+        Returns one of: 'lines', 'verses', 'paragraphs', 'sentences', 'words', 'characters', or ''.
+        """
+        q = (question or "").lower()
+        # Normalize parentheses text
+        q = q.replace("(", " ").replace(")", " ")
+        # Preferred order (more specific first)
+        if "verses" in q or "verse" in q or "lines of poetry" in q:
+            return "verses"
+        if "lines" in q or "line" in q:
+            return "lines"
+        if "stanzas" in q or "stanza" in q or "paragraphs" in q or "paragraph" in q:
+            return "paragraphs"
+        if "sentences" in q or "sentence" in q:
+            return "sentences"
+        if "words" in q or "word count" in q or "number of words" in q:
+            return "words"
+        if "characters" in q or "letters" in q:
+            return "characters"
         return ""
 
     def _count_word_occurrences(self, text: str, target: str, case_sensitive: bool = False) -> int:
@@ -680,31 +709,70 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         """
         Handle a counting question by extracting the target and counting occurrences.
         """
-        # Extract what to count
-        target = self._extract_counting_target(question)
-        if not target:
-            is_ar = getattr(self, '_current_lang', 'en') == 'ar'
-            return "لم أتمكن من تحديد الكلمة أو العبارة المراد عدها من السؤال." if is_ar else "Could not identify the word or phrase to count from your question."
-        
-        # Get full document text
+        # Get full document text first
         full_text = ""
         if doc_key and self.large_doc_manager.has_vector_store(doc_key):
             try:
                 full_text = self.large_doc_manager.read_full_text(doc_key)
             except Exception:
                 pass
-        
         if not full_text and hasattr(self, '_qa_document_text'):
             full_text = self._qa_document_text or ""
-        
         if not full_text:
             is_ar = getattr(self, '_current_lang', 'en') == 'ar'
             return "لا يوجد نص مستند متاح للعد." if is_ar else "No document text available for counting."
-        
-        # Count occurrences
+
+        # Structural counting (lines, verses, paragraphs, sentences, words, characters)
+        stype = self._detect_structural_count(question)
+        if stype:
+            import re
+            is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+            result = 0
+            if stype in {"lines", "verses"}:
+                result = len([ln for ln in full_text.splitlines() if ln.strip()])
+                if is_ar:
+                    return (f"عدد الأبيات (أسطر الشعر) في المستند: {result}" if stype == "verses"
+                            else f"عدد الأسطر في المستند: {result}")
+                else:
+                    return (f"Number of verses (lines of poetry) in the document: {result}" if stype == "verses"
+                            else f"Number of lines in the document: {result}")
+            if stype == "paragraphs":
+                # Split on blank lines (one or more)
+                parts = [p for p in re.split(r"(?:\r?\n\s*){2,}", full_text) if p and p.strip()]
+                result = len(parts)
+                if is_ar:
+                    return f"عدد الفقرات في المستند: {result}"
+                else:
+                    return f"Number of paragraphs in the document: {result}"
+            if stype == "sentences":
+                parts = [s for s in re.split(r"[.!?]+", full_text) if s and s.strip()]
+                result = len(parts)
+                if is_ar:
+                    return f"عدد الجمل في المستند: {result}"
+                else:
+                    return f"Number of sentences in the document: {result}"
+            if stype == "words":
+                words = re.findall(r"\b\w+\b", full_text, flags=re.UNICODE)
+                result = len(words)
+                if is_ar:
+                    return f"عدد الكلمات في المستند: {result}"
+                else:
+                    return f"Number of words in the document: {result}"
+            if stype == "characters":
+                result = len(re.sub(r"\s+", "", full_text))
+                if is_ar:
+                    return f"عدد الأحرف (بدون مسافات) في المستند: {result}"
+                else:
+                    return f"Number of characters (non-whitespace) in the document: {result}"
+
+        # Otherwise, extract a literal word/phrase to count
+        target = self._extract_counting_target(question)
+        if not target:
+            is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+            return "لم أتمكن من تحديد الكلمة أو العبارة المراد عدها من السؤال." if is_ar else "Could not identify the word or phrase to count from your question."
+
+        # Count occurrences of the target term/phrase
         count = self._count_word_occurrences(full_text, target, case_sensitive=False)
-        
-        # Format response
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         if is_ar:
             return f"تم العثور على \"{target}\" {count} مرة في المستند."
@@ -860,28 +928,9 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self._set_qa_controls_enabled(False)
         self._start_qa_typing_indicator()
 
-        # Classify the question type before proceeding
+        # Determine provider and API key (classification will run in the worker thread)
         provider_type = "ollama" if provider.startswith("Offline") else ("gemini" if "Gemini" in provider else "")
         gemini_key = self._get_gemini_key() if "Gemini" in provider else ""
-        
-        try:
-            question_type = self._classify_question_type(question, provider_type, model, gemini_key)
-            
-            # Handle counting questions directly
-            if question_type == "COUNT":
-                try:
-                    count_result = self._handle_counting_question(question, self._qa_vector_doc_key)
-                    self._append_chat("Assistant", count_result)
-                    self._append_history("assistant", count_result)
-                    self._set_qa_controls_enabled(True)
-                    self._stop_qa_typing_indicator()
-                    return
-                except Exception as e:
-                    print(f"Counting error: {e}")
-                    # Fall back to normal RAG processing if counting fails
-        except Exception as e:
-            print(f"Classification error: {e}")
-            # Fall back to normal RAG processing if classification fails
 
         # Continue with normal RAG processing for non-counting questions
         params = {
@@ -966,6 +1015,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             # Summary placeholder
             if hasattr(self.ui, 'summaryTextEdit'):
                 self.ui.summaryTextEdit.setPlaceholderText("سيظهر التحليل هنا..." if is_ar else "Your analysis will appear here...")
+            if hasattr(self.ui, 'pasteTextEdit'):
+                self.ui.pasteTextEdit.setPlaceholderText("الصق نصك هنا..." if is_ar else "Paste your text here...")
             # Tabs text: Upload / Paste
             if hasattr(self.ui, 'tabs') and hasattr(self.ui, 'uploadTab') and hasattr(self.ui, 'pasteTab'):
                 try:
@@ -2271,6 +2322,29 @@ class _QAWorker(QObject):
             if not model:
                 self.error.emit("No model selected for Q&A")
                 return
+
+            # First, classify the question type in the background thread
+            try:
+                # Extract the latest user question
+                question = ""
+                for m in reversed(messages or []):
+                    if m.get("role") == "user":
+                        question = (m.get("content", "") or "").strip()
+                        break
+                if question:
+                    qtype = self.window._classify_question_type(question, provider, model, gemini_key or "")
+                    if qtype == "COUNT":
+                        try:
+                            count_result = self.window._handle_counting_question(question, doc_key)
+                            self.finished.emit(count_result or "")
+                            return
+                        except Exception:
+                            # Fall back to normal RAG if counting fails
+                            pass
+            except Exception:
+                # On any classification error, proceed with normal flow
+                pass
+
             if provider == "ollama":
                 answer = self.window.answer_question_offline(model, messages, summary, input_text, doc_key)
                 self.finished.emit(answer or "")

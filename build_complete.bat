@@ -70,7 +70,7 @@ REM ------------------------------------------------------------
 REM Build (ONEFILE to produce a single EXE)
 REM ------------------------------------------------------------
 echo Building %APP_NAME% executable...
-"%PYEXE%" -m PyInstaller --noconfirm --clean --onefile ^
+"%PYEXE%" -m PyInstaller --noconfirm --clean --onefile --noconsole ^
   --name "%APP_NAME%" ^
   %ICON_OPT% ^
   --add-data "assets;assets" ^
@@ -88,6 +88,8 @@ echo Building %APP_NAME% executable...
   --collect-all easyocr ^
   --collect-all PIL ^
   --collect-all cv2 ^
+  --collect-all PyPDF2 ^
+  --collect-all docx ^
   --collect-submodules langchain_community.vectorstores ^
   --collect-submodules langchain_huggingface ^
   --hidden-import offline_bootstrap ^

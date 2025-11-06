@@ -10,7 +10,25 @@ os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
 os.environ.setdefault("CHROMA_DISABLE_TELEMETRY", "true")
 os.environ.setdefault("POSTHOG_DISABLED", "1")
 
-faulthandler.enable()
+try:
+    if getattr(sys, "stderr", None):
+        faulthandler.enable()
+    else:
+        log_dir = os.path.join(os.getenv("APPDATA") or os.getcwd(), "AI Document Analyzer")
+        try:
+            os.makedirs(log_dir, exist_ok=True)
+        except Exception:
+            pass
+        log_path = os.path.join(log_dir, "app.log")
+        try:
+            log_file = open(log_path, "a", encoding="utf-8", buffering=1)
+            sys.stderr = log_file
+            sys.stdout = log_file
+            faulthandler.enable(file=log_file)
+        except Exception:
+            pass
+except Exception:
+    pass
 
 from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QFile

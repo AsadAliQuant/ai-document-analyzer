@@ -1,3 +1,5 @@
+ai-app-console/node_modules/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -123,3 +125,6 @@ Thumbs.db
 apptodos.txt
 cache.txt
 models/
+
+# Local PHP API secrets (do not commit)
+server-php-auth/config.php
