@@ -1,37 +1,34 @@
 # -*- mode: python ; coding: utf-8 -*-
-from PyInstaller.utils.hooks import collect_submodules
 from PyInstaller.utils.hooks import collect_all
 
 datas = [('assets', 'assets'), ('styles.qss', '.'), ('config.json', '.'), ('models', 'models')]
 binaries = []
-hiddenimports = ['offline_bootstrap', 'qdrant_client', 'qdrant_client.models', 'sqlite3', 'easyocr', 'easyocr.recognition', 'easyocr.detection', 'PIL', 'PIL.Image', 'cv2', 'docx', 'pkg_resources']
-hiddenimports += collect_submodules('langchain_community.vectorstores')
-hiddenimports += collect_submodules('langchain_huggingface')
-tmp_ret = collect_all('PyQt6')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+hiddenimports = ['sentence_transformers', 'langchain_qdrant', 'langchain_huggingface', 'qdrant_client.local', 'portalocker', 'keyring', 'keyring.backends']
 tmp_ret = collect_all('sentence_transformers')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('transformers')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('huggingface_hub')
+tmp_ret = collect_all('langchain_qdrant')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('google.generativeai')
+tmp_ret = collect_all('langchain_huggingface')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('numpy')
+tmp_ret = collect_all('langchain_text_splitters')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('torch')
+tmp_ret = collect_all('langchain_core')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('qdrant_client')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('torch')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('scipy')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('sklearn')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('easyocr')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('PIL')
+tmp_ret = collect_all('google.generativeai')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('cv2')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('PyPDF2')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('docx')
+tmp_ret = collect_all('keyring')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 

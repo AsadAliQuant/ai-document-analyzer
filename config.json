@@ -1,3 +1,4 @@
 {
-  "GOOGLE_API_KEY": "123456789"
+  "GOOGLE_API_KEY": "",
+  "API_BASE_URL": "https://ssma.sa/ai_api"
 }

@@ -32,6 +32,23 @@ import locale
 from startup_helper import InitializationWorker, LoadingOverlayMixin
 from lock_manager import LockManager
 from lock_overlay import LockOverlay
+from login_overlay import LoginOverlay
+from auth import AuthState, clear_tokens
+
+# Windows theme detection
+def is_windows_dark_mode() -> bool:
+    """Detect if Windows is in dark mode via registry."""
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        )
+        value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        winreg.CloseKey(key)
+        return value == 0  # 0 = dark mode, 1 = light mode
+    except Exception:
+        return False  # Default to light mode if detection fails
 
 # Optional imports for file text extraction
 try:
@@ -55,11 +72,9 @@ except Exception:
     ollama_client = None
 
 try:
-    import easyocr  # type: ignore
     from PIL import Image  # type: ignore
     _ocr_available = True
 except Exception:
-    easyocr = None  # type: ignore
     Image = None  # type: ignore
     _ocr_available = False
 
@@ -77,6 +92,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self._loading_timer = None
         self._loading_dots = 0
         self._init_in_progress = True
+        self._login_overlay = None
         
         # Show loading overlay immediately
         self._keep_loading_message_constant = True
@@ -93,9 +109,11 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         )
         self.lock_overlay = LockOverlay(self)
         self.lock_manager.lock_status_changed.connect(self._on_lock_status_changed)
+        self.lock_manager.lock_message_changed.connect(self._on_lock_message_changed)
         
         # Show overlay if already locked on startup
         if self.lock_manager.get_current_status():
+            self.lock_overlay.set_custom_message(self.lock_manager.get_lock_message())
             self.lock_overlay.show_overlay()
 
         # Settings Window
@@ -144,6 +162,13 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         # Connect buttons
         # Old external choose file button removed; hook internal dropArea browse
         self.ui.analyzeButton.clicked.connect(self.analyze_document)
+        
+        # Apply initial theme-aware button style and set up theme change detection
+        self._apply_analyze_button_theme()
+        self._theme_check_timer = QTimer(self)
+        self._theme_check_timer.timeout.connect(self._check_theme_change)
+        self._theme_check_timer.start(2000)  # Check every 2 seconds
+        self._last_dark_mode = is_windows_dark_mode()
         self.ui.settingsButton.clicked.connect(self.open_settings)
         # Top settings mirrors sidebar settings
         if hasattr(self.ui, 'topSettingsButton'):
@@ -180,6 +205,15 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self.offline_state_path = os.path.join(self.app_config_dir, "offline_state.json")
         self._offline_state = self._load_offline_state()
         self._apply_offline_state_to_settings()
+
+        # Initialize attributes that will be set by background worker (with safe defaults)
+        self.large_doc_manager = None
+        self._qa_vector_doc_key = ""
+        self._pending_analysis_params = None
+        self._processing_thread = None
+        self._processing_worker = None
+        self._ocr_reader = None
+        self.online_models_gemini = []
 
         # Defer heavy initialization to background thread
         self._init_thread = QThread(self)
@@ -274,7 +308,198 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
 
         # Ensure UI is localized to current runtime language
         self.apply_language(getattr(self, "_current_lang", "en"))
+        
+        self._api_base_url = ""
+        self._user_strip = QWidget()
+        _u_layout = QHBoxLayout(self._user_strip)
+        _u_layout.setContentsMargins(0, 0, 0, 0)
+        _u_layout.setSpacing(6)
+        self._user_label = QLabel("")
+        self._logout_button = QPushButton("LOGOUT")
+        try:
+            self._logout_button.setFlat(True)
+        except Exception:
+            pass
+        try:
+            self._logout_button.setStyleSheet(
+                "QPushButton { background-color: #B71C1C; color: white; border: 1px solid #7F0000; "
+                "border-radius: 4px; padding: 4px 10px; } "
+                "QPushButton:hover { background-color: #C62828; } "
+                "QPushButton:pressed { background-color: #8E0000; }"
+            )
+        except Exception:
+            pass
+        self._logout_button.clicked.connect(self._on_logout_clicked)
+        _u_layout.addWidget(self._user_label)
+        _u_layout.addWidget(self._logout_button)
+        try:
+            if hasattr(self.ui, 'statusbar'):
+                self.ui.statusbar.addPermanentWidget(self._user_strip)
+        except Exception:
+            pass
+        self._update_user_strip()
+        
+    def show_login_overlay(self, base_url: str) -> None:
+        try:
+            if hasattr(self, "_loading_overlay") and self._loading_overlay and self._loading_overlay.isVisible():
+                self._hide_loading_overlay()
+        except Exception:
+            pass
+        if not getattr(self, "_login_overlay", None):
+            self._login_overlay = LoginOverlay(base_url, self)
+            try:
+                self._login_overlay.logged_in.connect(self._on_login_success)
+            except Exception:
+                pass
+        self._api_base_url = base_url or getattr(self, "_api_base_url", "")
+        try:
+            self._login_overlay.show_overlay()
+            # Start animated loading text only while the app initializes
+            try:
+                if getattr(self, "_init_in_progress", False):
+                    self._login_overlay.start_loading_animation("Loading AI Document Analyzer")
+                else:
+                    self._login_overlay.stop_loading_animation()
+                # Ensure overlay is interactive
+                self._login_overlay.setEnabled(True)
+            except Exception:
+                pass
+        except Exception:
+            pass
 
+    def _on_login_success(self) -> None:
+        try:
+            if getattr(self, "_login_overlay", None):
+                self._login_overlay.hide_overlay()
+        except Exception:
+            pass
+        try:
+            self._update_user_strip()
+        except Exception:
+            pass
+
+    def _update_user_strip(self) -> None:
+        user = getattr(AuthState, 'user', None) or {}
+        email = str(user.get('email', '') or '').strip() if isinstance(user, dict) else ''
+        has_user = bool(email)
+        try:
+            if has_user:
+                self._user_label.setText(email)
+                self._user_strip.setVisible(True)
+                self._logout_button.setVisible(True)
+            else:
+                self._user_label.setText("")
+                self._user_strip.setVisible(False)
+        except Exception:
+            pass
+
+    def _on_logout_clicked(self) -> None:
+        try:
+            clear_tokens()
+        except Exception:
+            pass
+        try:
+            self._reset_user_session_state()
+        except Exception:
+            pass
+        try:
+            self._update_user_strip()
+        except Exception:
+            pass
+        base = getattr(self, "_api_base_url", "") or self._get_api_base_url_fallback()
+        try:
+            self.show_login_overlay(base)
+        except Exception:
+            pass
+
+    def _reset_user_session_state(self) -> None:
+        try:
+            self._last_summary_text = ""
+        except Exception:
+            pass
+        try:
+            self._last_summary_json = None
+        except Exception:
+            pass
+        try:
+            self._last_input_text_for_qa = ""
+            self._qa_document_text = ""
+            self._qa_vector_doc_key = ""
+            self._current_doc_key = ""
+        except Exception:
+            pass
+        try:
+            self._clear_chat()
+        except Exception:
+            pass
+        try:
+            if hasattr(self.ui, 'summaryTextEdit'):
+                self.ui.summaryTextEdit.clear()
+        except Exception:
+            pass
+        try:
+            if hasattr(self.ui, 'questionLineEdit'):
+                self.ui.questionLineEdit.clear()
+        except Exception:
+            pass
+        try:
+            if hasattr(self.ui, 'pasteTextEdit'):
+                self.ui.pasteTextEdit.clear()
+        except Exception:
+            pass
+        try:
+            self._set_qa_group_enabled(False)
+        except Exception:
+            pass
+        try:
+            self._stop_qa_typing_indicator()
+        except Exception:
+            pass
+        try:
+            self._selected_file_path = ""
+            if hasattr(self.ui, 'dropArea'):
+                self.ui.dropArea.setSelectedFileName("")
+        except Exception:
+            pass
+
+    def _get_api_base_url_fallback(self) -> str:
+        try:
+            import json as _json
+            import os as _os
+            appdata = _os.getenv("APPDATA") or _os.path.expanduser("~")
+            cfg_dir = _os.path.join(appdata, "AI Document Analyzer")
+            cfg_path = _os.path.join(cfg_dir, "config.json")
+            if _os.path.exists(cfg_path):
+                with open(cfg_path, "r", encoding="utf-8") as f:
+                    cfg = _json.load(f)
+                base = cfg.get("API_BASE_URL")
+                if base:
+                    return str(base).rstrip("/")
+        except Exception:
+            pass
+        try:
+            import json as _json
+            if os.path.exists("config.json"):
+                with open("config.json", "r", encoding="utf-8") as f:
+                    cfg = _json.load(f)
+                base = cfg.get("API_BASE_URL")
+                if base:
+                    return str(base).rstrip("/")
+        except Exception:
+            pass
+        return "https://ssma.sa/ai_api"
+
+    # Override init-finished hook to stop the overlay's loading animation
+    def _on_init_finished(self):
+        try:
+            super()._on_init_finished()
+        except Exception:
+            pass
+        try:
+            if getattr(self, "_login_overlay", None):
+                self._login_overlay.stop_loading_animation()
+        except Exception:
+            pass
 
     def _appdata_config_dir(self) -> str:
         try:
@@ -370,13 +595,40 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
     # Removed clear-file handler (feature reverted)
 
     def analyze_document(self):
-        source = self.ui.modelSourceCombo.currentText() if hasattr(self.ui, 'modelSourceCombo') else ""
-        file_path = self._get_selected_file_path()
-        is_image = bool(file_path and self.is_image_file(file_path))
-        input_text = self._get_input_text()
-        if not file_path and not input_text:
-            QMessageBox.information(self, "Input Required", "Please paste text or choose a supported file (PDF/DOCX/TXT/PNG/JPG).")
+        # Check if initialization completed successfully
+        if self.large_doc_manager is None:
+            QMessageBox.critical(
+                self,
+                "Initialization Error",
+                "The application failed to initialize properly. Please check the console for errors and restart the application."
+            )
             return
+        
+        source = self.ui.modelSourceCombo.currentText() if hasattr(self.ui, 'modelSourceCombo') else ""
+        
+        # Determine which tab is active to prioritize the correct input source
+        # Tab 0 = Upload Document, Tab 1 = Paste Text
+        active_tab_index = 0
+        if hasattr(self.ui, 'tabs'):
+            active_tab_index = self.ui.tabs.currentIndex()
+        
+        file_path = ""
+        input_text = ""
+        is_image = False
+        
+        if active_tab_index == 1:
+            # User is on "Paste Text" tab - analyze pasted text only
+            input_text = self._get_input_text()
+            if not input_text:
+                QMessageBox.information(self, "Input Required", "Please paste text to analyze.")
+                return
+        else:
+            # User is on "Upload Document" tab - analyze uploaded file only
+            file_path = self._get_selected_file_path()
+            is_image = bool(file_path and self.is_image_file(file_path))
+            if not file_path:
+                QMessageBox.information(self, "Input Required", "Please choose a supported file (PDF/DOCX/TXT/PNG/JPG).")
+                return
 
         provider = ""
         model = self.ui.availableModelCombo.currentText() if hasattr(self.ui, 'availableModelCombo') else ""
@@ -1035,9 +1287,9 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             if hasattr(self.ui, 'dropArea'):
                 try:
                     localized_drop = (
-                        "اسحب وأفلت هنا (PDF, DOCX, TXT, PNG, JPG) أو انقر لاختيار ملف"
+                        "انقر لاختيار ملف: PDF, DOCX, TXT, PNG, JPG"
                         if is_ar else
-                        "Drag & Drop here (PDF, DOCX, TXT, PNG, JPG) OR click to choose a file"
+                        "Click to choose a file: PDF, DOCX, TXT, PNG, JPG"
                     )
                     if hasattr(self.ui.dropArea, '_default_label_text'):
                         self.ui.dropArea._default_label_text = localized_drop
@@ -1179,8 +1431,13 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             inner = self._extract_body_inner_html(widget_html) or widget_html
             final_html = self._build_export_html(inner)
         else:
+            is_ar = getattr(self, "_current_lang", "en") == "ar"
+            if is_ar:
+                fallback_font = "Tahoma, Arial, sans-serif"
+            else:
+                fallback_font = "Poppins, Segoe UI, Arial, sans-serif"
             body = (
-                "<div style='white-space:pre-wrap; font-family:Times New Roman, serif; font-size:11pt;'>"
+                f"<div style='white-space:pre-wrap; font-family:{fallback_font}; font-size:48pt;'>"
                 f"{self._escape_html(text)}"  # safe, escaped
                 "</div>"
             )
@@ -1378,7 +1635,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
 
     def _start_background_export(self, html: str, save_path: str):
         thread = QThread(self)
-        worker = _ExportWorker(html, save_path)
+        is_ar = getattr(self, "_current_lang", "en") == "ar"
+        worker = _ExportWorker(html, save_path, is_ar)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_export_finished)
@@ -1461,6 +1719,57 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         except Exception:
             return "Analyze Document"
 
+    def _apply_analyze_button_theme(self):
+        """Apply theme-aware styling to the Analyze Document button based on Windows dark/light mode."""
+        try:
+            dark_mode = is_windows_dark_mode()
+            if dark_mode:
+                # Dark mode: white background, black text
+                self.ui.analyzeButton.setStyleSheet(
+                    "QPushButton {"
+                    "  background-color: #FFFFFF; color: #000000;"
+                    "  font-weight: bold;"
+                    "}"
+                    "QPushButton:hover {"
+                    "  background-color: #E0E0E0;"
+                    "}"
+                    "QPushButton:pressed {"
+                    "  background-color: #BDBDBD;"
+                    "}"
+                )
+            else:
+                # Light mode: black background, white text
+                self.ui.analyzeButton.setStyleSheet(
+                    "QPushButton {"
+                    "  background-color: #000000; color: #FFFFFF;"
+                    "  font-weight: bold;"
+                    "}"
+                    "QPushButton:hover {"
+                    "  background-color: #333333;"
+                    "}"
+                    "QPushButton:pressed {"
+                    "  background-color: #555555;"
+                    "}"
+                )
+        except Exception:
+            pass
+
+    def _check_theme_change(self):
+        """Periodically check if Windows theme has changed and update UI accordingly."""
+        try:
+            current_dark_mode = is_windows_dark_mode()
+            if current_dark_mode != getattr(self, '_last_dark_mode', False):
+                self._last_dark_mode = current_dark_mode
+                self._apply_analyze_button_theme()
+                # Also update DropArea theme (background, border, and label)
+                if hasattr(self.ui, 'dropArea') and hasattr(self.ui.dropArea, 'updateTheme'):
+                    try:
+                        self.ui.dropArea.updateTheme()
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
     # --- Inputs & Extraction ---
     def _get_input_text(self) -> str:
         """Return pasted text only. Do not extract from file locally."""
@@ -1518,21 +1827,36 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
     
     def extract_text_from_image_ocr(self, file_path: str) -> str:
         """Extract text from image using EasyOCR."""
-        if not _ocr_available:
-            raise RuntimeError("EasyOCR not installed. Please install 'easyocr' and 'Pillow'.")
-        
+        # Ensure dependencies are available at call time
+        try:
+            import easyocr  # type: ignore
+        except Exception as import_err:
+            raise RuntimeError(f"EasyOCR not installed or failed to load: {import_err}")
+        try:
+            from PIL import Image  # type: ignore
+        except Exception:
+            raise RuntimeError("Pillow not installed. Please install 'Pillow'.")
+
         # Lazy-load OCR reader (expensive initialization)
         if self._ocr_reader is None:
             try:
-                # Initialize with English and Arabic support, GPU if available
-                import torch
-                gpu = torch.cuda.is_available()
+                # Initialize with English and Arabic support, GPU disabled for frozen apps
+                gpu = False
+                if not getattr(sys, 'frozen', False):
+                    # Only try GPU in non-frozen environment
+                    try:
+                        import torch  # type: ignore
+                        try:
+                            gpu = bool(torch.cuda.is_available())
+                        except Exception:
+                            gpu = False
+                    except Exception:
+                        gpu = False
                 # Force EasyOCR to use app-local models cache prepared by offline_bootstrap
                 try:
                     models_dir = getattr(self.large_doc_manager, 'models_dir', None)
                     if not models_dir:
                         models_dir = os.path.join(self._appdata_config_dir(), 'models')
-                    os.makedirs(models_dir, exist_ok=True)
                 except Exception:
                     models_dir = os.path.join(os.getcwd(), 'models')
                 easyocr_dir = os.path.join(models_dir, 'easyocr')
@@ -1540,12 +1864,17 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                     os.makedirs(easyocr_dir, exist_ok=True)
                 except Exception:
                     pass
-                # Do not download at runtime; rely on offline bootstrap to fetch/copy
+                # Allow download if models not present (first run scenario)
+                # Check if models already exist
+                models_exist = any(
+                    f.endswith('.pth') or f.endswith('.bin')
+                    for f in os.listdir(easyocr_dir)
+                ) if os.path.isdir(easyocr_dir) else False
                 self._ocr_reader = easyocr.Reader(
                     ['en', 'ar'],
                     gpu=gpu,
                     model_storage_directory=easyocr_dir,
-                    download_enabled=False,
+                    download_enabled=not models_exist,  # Download only if models missing
                 )
             except Exception as e:
                 raise RuntimeError(f"Failed to initialize EasyOCR reader: {e}")
@@ -1784,17 +2113,18 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         title_text = self._get_localized_summary_title(title_base)
         # Align title based on language: right for Arabic, left for English
         title_align = "right" if is_ar else "left"
-        # Use Windows-common fonts: Tahoma for Arabic, Arial for English
-        title_font_family = "Tahoma" if is_ar else "Arial"
+        # Use Windows-common fonts: Tahoma for Arabic, Poppins for English
+        title_font_family = "Tahoma" if is_ar else "Poppins, Arial, sans-serif"
         title_html = (
             f"<h1 style='font-family:{title_font_family}; font-size:22pt; font-weight:bold; margin:0 0 12px 0; text-align:{title_align};'>"
             f"{self._escape_html(title_text)}"
             f"</h1>"
         )
 
-        container_style = "font-family:Segoe UI, Arial, sans-serif; font-size:12pt; color:#111"
         if is_ar:
-            container_style += "; direction:rtl; text-align:right"
+            container_style = "font-family:Tahoma, Arial, sans-serif; font-size:12pt; color:#111; direction:rtl; text-align:right"
+        else:
+            container_style = "font-family:Poppins, Segoe UI, Arial, sans-serif; font-size:12pt; color:#111"
 
         html = (
             f"<div style='{container_style}'>"
@@ -1879,7 +2209,10 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         try:
             is_ar = getattr(self, "_current_lang", "en") == "ar"
             dir_attr = " dir='rtl'" if is_ar else ""
-            style_base = "font-family:Times New Roman, serif; font-size:11pt; color:#111; min-height:100%;"
+            if is_ar:
+                style_base = "font-family:Tahoma, Arial, sans-serif; font-size:11pt; color:#111; min-height:100%;"
+            else:
+                style_base = "font-family:Poppins, Segoe UI, Arial, sans-serif; font-size:11pt; color:#111; min-height:100%;"
             # Align H1 per language and enforce larger size/weight
             h1_align = "right" if is_ar else "left"
             page_style = (
@@ -2216,9 +2549,14 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
     def _on_lock_status_changed(self, is_locked: bool):
         """Handle lock status changes from the lock manager."""
         if is_locked:
+            self.lock_overlay.set_custom_message(self.lock_manager.get_lock_message())
             self.lock_overlay.show_overlay()
         else:
             self.lock_overlay.hide_overlay()
+    
+    def _on_lock_message_changed(self, message: str):
+        """Handle lock message changes from the lock manager."""
+        self.lock_overlay.set_custom_message(message)
     
     def resizeEvent(self, event):
         """Ensure lock overlay stays covering the entire window."""
@@ -2480,10 +2818,41 @@ class _ExportWorker(QObject):
     finished = pyqtSignal(str)  # save_path
     error = pyqtSignal(str)  # error message
 
-    def __init__(self, html: str, save_path: str):
+    def __init__(self, html: str, save_path: str, is_ar: bool = False):
         super().__init__()
         self.html = html
         self.save_path = save_path
+        self.is_ar = is_ar
+
+    def _resolve_export_user_name(self) -> str:
+        try:
+            user = getattr(AuthState, "user", None) or {}
+            if isinstance(user, dict):
+                name = str(user.get("name", "") or "").strip()
+                email = str(user.get("email", "") or "").strip()
+            else:
+                name = ""
+                email = ""
+
+            if name:
+                parts = [p for p in name.split() if p]
+                if not parts:
+                    return ""
+                if len(parts) == 1:
+                    return parts[0]
+                return f"{parts[0]} {parts[-1]}"
+
+            if email:
+                local = email.split("@", 1)[0]
+                local_clean = re.sub(r"[._\-]+", " ", local)
+                tokens = [t for t in local_clean.split() if t]
+                if tokens:
+                    if len(tokens) == 1:
+                        return tokens[0].capitalize()
+                    return f"{tokens[0].capitalize()} {tokens[-1].capitalize()}"
+        except Exception:
+            pass
+        return ""
 
     @pyqtSlot()
     def run(self):
@@ -2491,12 +2860,85 @@ class _ExportWorker(QObject):
             writer = QPdfWriter(self.save_path)
             writer.setPageSize(QPageSize(QPageSize.PageSizeId.A4))
             writer.setResolution(300)
+
             doc = QTextDocument()
             doc.setHtml(self.html)
-            doc.print(writer)
+
+            dpi = writer.resolution()
+            full_rect = writer.pageLayout().fullRectPixels(dpi)
+            page_width = float(full_rect.width())
+            page_height = float(full_rect.height())
+
+            def mm_to_pixels(mm: float) -> float:
+                return mm * dpi / 25.4
+
+            # Use the same margins as defined in _build_export_html's @page rule
+            left_margin = mm_to_pixels(18.0)
+            right_margin = mm_to_pixels(18.0)
+            top_margin = mm_to_pixels(24.0)
+            bottom_margin = mm_to_pixels(24.0)
+
+            text_rect = QRectF(
+                float(full_rect.x()) + left_margin,
+                float(full_rect.y()) + top_margin,
+                page_width - left_margin - right_margin,
+                page_height - top_margin - bottom_margin,
+            )
+
+            # Paginate the document based on the text area
+            doc.setPageSize(text_rect.size())
+            page_count = doc.pageCount()
+
+            painter = QPainter(writer)
+            try:
+                export_name = self._resolve_export_user_name()
+                footer_text = ""
+                if export_name:
+                    name_parts = [p for p in str(export_name).split() if p]
+                    first_name = name_parts[0] if name_parts else str(export_name)
+                    if getattr(self, "is_ar", False):
+                        footer_text = f"ملخص تم تصديره بواسطة {export_name}"
+                    else:
+                        footer_text = f"Summary Exported by {export_name}"
+
+                footer_height = painter.fontMetrics().height() if footer_text else painter.fontMetrics().height()
+                footer_rect = QRectF(
+                    text_rect.left(),
+                    text_rect.bottom(),
+                    text_rect.width(),
+                    bottom_margin if bottom_margin > footer_height else footer_height,
+                )
+
+                for page_index in range(page_count):
+                    if page_index > 0:
+                        writer.newPage()
+
+                    painter.save()
+                    page_top = float(page_index) * doc.pageSize().height()
+                    painter.setClipRect(text_rect)
+                    painter.translate(text_rect.left(), text_rect.top() - page_top)
+                    doc.drawContents(painter)
+                    painter.restore()
+
+                    if footer_text:
+                        painter.drawText(
+                            footer_rect,
+                            Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft,
+                            footer_text,
+                        )
+
+                    page_number_text = str(page_index + 1)
+                    painter.drawText(
+                        footer_rect,
+                        Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight,
+                        page_number_text,
+                    )
+            finally:
+                try:
+                    painter.end()
+                except Exception:
+                    pass
+
             self.finished.emit(self.save_path)
         except Exception as e:
             self.error.emit(str(e))
-
-
-

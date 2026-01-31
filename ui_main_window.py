@@ -1,4 +1,20 @@
+import os
 from PyQt6 import QtCore, QtGui, QtWidgets
+
+
+def _is_windows_dark_mode() -> bool:
+    """Detect if Windows is in dark mode via registry."""
+    try:
+        import winreg
+        key = winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+        )
+        value, _ = winreg.QueryValueEx(key, "AppsUseLightTheme")
+        winreg.CloseKey(key)
+        return value == 0  # 0 = dark mode, 1 = light mode
+    except Exception:
+        return False  # Default to light mode if detection fails
 
 
 class DropArea(QtWidgets.QWidget):
@@ -8,6 +24,8 @@ class DropArea(QtWidgets.QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setAcceptDrops(True)
+        self.setAutoFillBackground(True)  # Required for QWidget to paint background/border
+        self.setAttribute(QtCore.Qt.WidgetAttribute.WA_StyledBackground, True)  # Enable styled background
         self._is_drag_over = False
         self._accepted_exts = {".pdf", ".docx", ".txt", ".png", ".jpg", ".jpeg"}
         self._preferred_height = 120
@@ -18,7 +36,7 @@ class DropArea(QtWidgets.QWidget):
         )
         self._content = QtWidgets.QVBoxLayout(self)
         self._content.setContentsMargins(0, 0, 0, 0)
-        self._default_label_text = "Drag & Drop here (PDF, DOCX, TXT, PNG, JPG) OR click to choose a file"
+        self._default_label_text = "Click to choose a file: PDF, DOCX, TXT, PNG, JPG"
         self._label = QtWidgets.QLabel(self._default_label_text)
         self._label.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
         self._label.setWordWrap(True)
@@ -47,16 +65,50 @@ class DropArea(QtWidgets.QWidget):
         self._content.addStretch(1)
 
         self._update_style()
+        self._apply_label_theme()  # Apply initial theme-aware label color
 
     def sizeHint(self) -> QtCore.QSize:  # type: ignore[override]
         return QtCore.QSize(0, self._preferred_height)
 
     def setSelectedFileName(self, file_path: str):
-        name = QtCore.QFileInfo(file_path).fileName()
+        # Extract only the filename, hiding the full path
+        name = ""
+        if file_path:
+            try:
+                # Try os.path.basename first (more reliable across Windows versions)
+                name = os.path.basename(file_path)
+            except Exception:
+                pass
+            if not name:
+                try:
+                    name = QtCore.QFileInfo(file_path).fileName()
+                except Exception:
+                    pass
         if name:
             self._label.setText(name)
         else:
             self._label.setText(self._default_label_text)
+        # Reapply theme to ensure correct text color
+        self._apply_label_theme()
+
+    def _apply_label_theme(self):
+        """Apply theme-aware text color to the label based on Windows dark/light mode."""
+        try:
+            dark_mode = _is_windows_dark_mode()
+            if dark_mode:
+                # Dark mode: white text
+                self._label.setStyleSheet("QLabel { color: #FFFFFF; background: transparent; border: none; }")
+            else:
+                # Light mode: black text
+                self._label.setStyleSheet("QLabel { color: #000000; background: transparent; border: none; }")
+        except Exception:
+            # Fallback to black text
+            self._label.setStyleSheet("QLabel { color: #000000; background: transparent; border: none; }")
+
+    def updateTheme(self):
+        """Public method to update all theme-aware styles (called when Windows theme changes)."""
+        self._update_style()
+        self._apply_label_theme()
 
     
 
@@ -78,12 +130,23 @@ class DropArea(QtWidgets.QWidget):
 
 
     def _update_style(self):
-        bg = "#fff8f2" if self._is_drag_over else "#fdffffff"
+        dark_mode = _is_windows_dark_mode()
+        if dark_mode:
+            # Dark mode: dark background, white dashed border
+            bg = "#3a3a3a" if self._is_drag_over else "#2d2d2d"
+            border_color = "#FFFFFF"
+        else:
+            # Light mode: light background, dark dashed border
+            bg = "#fff8f2" if self._is_drag_over else "#fdffffff"
+            border_color = "#570000"
+        # Use DropArea selector to ensure styles apply to this widget specifically
         self.setStyleSheet(
-            "border: 2px dashed #570000;"
-            "padding: 80px;"
-            "border-radius: 8px;"
-            f"background-color: {bg};"
+            f"DropArea {{"
+            f"  border: 2px dashed {border_color};"
+            f"  padding: 80px;"
+            f"  border-radius: 8px;"
+            f"  background-color: {bg};"
+            f"}}"
         )
 
     def _has_acceptable_file(self, mime_data: QtCore.QMimeData) -> bool:

@@ -12,6 +12,7 @@ from PyQt6.QtCore import QTimer, QObject, pyqtSignal
 class LockManager(QObject):
     """Checks lock status from online CSV file every 60 seconds."""
     lock_status_changed = pyqtSignal(bool)  # True = locked, False = unlocked
+    lock_message_changed = pyqtSignal(str)  # Custom message from A2
     
     def __init__(self, csv_url: str, state_file: str = "cache.txt"):
         super().__init__()
@@ -31,6 +32,7 @@ class LockManager(QObject):
 
         self._fernet = self._init_cipher()
         self.is_locked = False
+        self.lock_message = ""  # Custom message from A2
         print(f"[LockManager] State file location: {self.state_file}")
 
         # Load last known state
@@ -111,7 +113,8 @@ class LockManager(QObject):
             
             print(f"[LockManager] Raw CSV data: {repr(csv_data[:100])}")
             
-            # Get first line, first value (A1)
+            # Get first line, first value (A1) for lock status
+            # Get second line, first value (A2) for custom message
             lines = csv_data.strip().split('\n')
             if lines:
                 first_value = lines[0].split(',')[0].strip()
@@ -119,10 +122,21 @@ class LockManager(QObject):
                 first_value = first_value.strip('"').strip("'")
                 new_locked = (first_value == '1')
                 
-                print(f"[LockManager] Parsed value: '{first_value}', Locked: {new_locked}")
+                # Get A2 custom message if available
+                new_message = ""
+                if len(lines) > 1:
+                    new_message = lines[1].split(',')[0].strip()
+                    new_message = new_message.strip('"').strip("'")
+                
+                print(f"[LockManager] Parsed value: '{first_value}', Locked: {new_locked}, Message: '{new_message}'")
                 
                 # Save state locally
                 self._save_local_state(new_locked)
+                
+                # Emit signal if message changed
+                if new_message != self.lock_message:
+                    self.lock_message = new_message
+                    self.lock_message_changed.emit(self.lock_message)
                 
                 # Emit signal if status changed
                 if new_locked != self.is_locked:
@@ -140,3 +154,7 @@ class LockManager(QObject):
     def get_current_status(self) -> bool:
         """Return current lock status (True = locked)."""
         return self.is_locked
+    
+    def get_lock_message(self) -> str:
+        """Return current lock message from A2."""
+        return self.lock_message

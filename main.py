@@ -1,11 +1,15 @@
 import os
 import sys
 import faulthandler
+import json
 
 # Set stability/env flags BEFORE any heavy ML/DB imports
 os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
+# Never allow background model downloads in packaged builds
+if getattr(sys, "frozen", False):
+    os.environ["AIDA_RUNTIME_PREFETCH"] = "0"
 # Strongly prefer Local (Python) Chroma API over Rust backend on Windows
 os.environ.setdefault("CHROMA_DISABLE_TELEMETRY", "true")
 os.environ.setdefault("POSTHOG_DISABLED", "1")
@@ -34,6 +38,32 @@ from PyQt6.QtWidgets import QApplication
 from PyQt6.QtCore import QFile
 from PyQt6.QtGui import QIcon
 from main_window import MainWindow
+from auth import refresh as auth_refresh, get_stored_refresh_token
+
+DEFAULT_API_BASE_URL = "https://ssma.sa/ai_api"
+
+def _load_api_base_url() -> str:
+    # Prefer user-specific config in %APPDATA% if present
+    try:
+        appdata = os.getenv("APPDATA") or os.path.expanduser("~")
+        cfg_dir = os.path.join(appdata, "AI Document Analyzer")
+        cfg_path = os.path.join(cfg_dir, "config.json")
+        if os.path.exists(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            base = cfg.get("API_BASE_URL")
+            if base:
+                return str(base).rstrip("/")
+    except Exception:
+        pass
+    # Fallback to local config.json
+    try:
+        with open("config.json", "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        base = cfg.get("API_BASE_URL") or DEFAULT_API_BASE_URL
+        return str(base).rstrip("/")
+    except Exception:
+        return DEFAULT_API_BASE_URL
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
@@ -44,6 +74,22 @@ if __name__ == "__main__":
             app.setStyleSheet(f.read())
     except Exception:
         pass
+    
+    # Resolve API base URL and attempt silent sign-in via refresh token
+    api_base = _load_api_base_url()
+    signed_in = False
+    try:
+        if get_stored_refresh_token():
+            auth_refresh(api_base)
+            signed_in = True
+    except Exception:
+        signed_in = False
+
     window = MainWindow()
     window.show()
+    if not signed_in:
+        try:
+            window.show_login_overlay(api_base)
+        except Exception:
+            pass
     sys.exit(app.exec())

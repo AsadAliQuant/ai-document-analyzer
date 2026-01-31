@@ -38,7 +38,7 @@ class LockOverlay(QFrame):
 
         # Detailed message
         message = QLabel(
-            "This application is temporarily disabled.\nPlease contact the developer to restore access."
+            "This application is temporarily disabled.\n"
         )
         message.setAlignment(Qt.AlignmentFlag.AlignCenter)
         message.setStyleSheet("color: rgb(220, 220, 220); background: transparent;")
@@ -47,6 +47,18 @@ class LockOverlay(QFrame):
         body_font.setPointSize(14)
         message.setFont(body_font)
         layout.addWidget(message)
+        
+        # Custom message from A2 (shown as last line)
+        self._custom_message_label = QLabel("")
+        self._custom_message_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._custom_message_label.setStyleSheet("color: rgb(255, 200, 100); background: transparent;")
+        self._custom_message_label.setWordWrap(True)
+        custom_font = QFont()
+        custom_font.setPointSize(12)
+        custom_font.setItalic(True)
+        self._custom_message_label.setFont(custom_font)
+        self._custom_message_label.hide()  # Hidden by default until message is set
+        layout.addWidget(self._custom_message_label)
 
         self.hide()
     
@@ -60,3 +72,12 @@ class LockOverlay(QFrame):
     def hide_overlay(self):
         """Hide the overlay."""
         self.hide()
+    
+    def set_custom_message(self, message: str):
+        """Set the custom message from A2 to display as the last line."""
+        if message and message.strip():
+            self._custom_message_label.setText(message.strip())
+            self._custom_message_label.show()
+        else:
+            self._custom_message_label.setText("")
+            self._custom_message_label.hide()

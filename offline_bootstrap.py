@@ -46,6 +46,8 @@ DEFAULT_STATE: Dict[str, object] = {
     "last_updated": 0,
 }
 
+RUNTIME_PREFETCH_ALLOWED = (os.getenv("AIDA_RUNTIME_PREFETCH", "0") == "1")
+
 
 def _copy_tree(src: str, dst: str) -> None:
     if not os.path.exists(src):
@@ -152,15 +154,21 @@ def _has_easyocr_cache(target_models_dir: str) -> bool:
 def _ensure_easyocr_models_cached(target_models_dir: str) -> bool:
     try:
         import easyocr  # type: ignore
+        easyocr_dir = os.path.join(target_models_dir, "easyocr")
+        os.makedirs(easyocr_dir, exist_ok=True)
+        
         # Trigger model download into our target directory
+        # Use download_enabled=True only if we have internet
+        download_enabled = _internet_available()
         easyocr.Reader(
             ["en", "ar"],
             gpu=False,
-            model_storage_directory=os.path.join(target_models_dir, "easyocr"),
-            download_enabled=True,
+            model_storage_directory=easyocr_dir,
+            download_enabled=download_enabled,
         )
         return _has_easyocr_cache(target_models_dir)
-    except Exception:
+    except Exception as e:
+        print(f"[offline_bootstrap] EasyOCR init warning: {e}")
         # Best-effort; skip if offline or any error
         return _has_easyocr_cache(target_models_dir)
 
@@ -296,6 +304,11 @@ def prepare_offline_assets(
             results[task.name] = True
             ready_count = sum(1 for value in results.values() if value)
             emit((ready_count / total_tasks) * 100.0, f"{task.title} ready")
+            continue
+
+        if not RUNTIME_PREFETCH_ALLOWED:
+            results[task.name] = False
+            emit((ready_count / total_tasks) * 100.0, f"{task.title} download disabled")
             continue
 
         if not _internet_available():

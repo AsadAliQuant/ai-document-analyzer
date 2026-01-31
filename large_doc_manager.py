@@ -2,29 +2,61 @@ import hashlib
 import json
 import os
 import time
-from typing import List, Optional
-
-try:
-    import torch  # type: ignore
-except Exception:
-    torch = None  # type: ignore
+from typing import List, Optional, Any
 
 try:
     from qdrant_client import QdrantClient  # type: ignore
-    from langchain_community.vectorstores import Qdrant  # type: ignore
+    from qdrant_client.models import Distance, VectorParams  # type: ignore
     _qdrant_available = True
 except Exception:
     QdrantClient = None  # type: ignore
-    Qdrant = None  # type: ignore
+    Distance = None  # type: ignore
+    VectorParams = None  # type: ignore
     _qdrant_available = False
 
-from langchain.schema import Document
-from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_huggingface import HuggingFaceEmbeddings
+try:
+    from langchain_core.documents import Document
+except ImportError:
+    from langchain.schema import Document
 
 
 class LargeDocumentManager:
     """Manage chunking and vector store persistence for large documents."""
+
+    def _fallback_split_text(self, text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
+        # Minimal dependency-free chunking fallback for packaged builds
+        data = (text or "").strip()
+        if not data:
+            return []
+        try:
+            size = int(chunk_size)
+        except Exception:
+            size = 1200
+        try:
+            overlap = int(chunk_overlap)
+        except Exception:
+            overlap = 200
+
+        if size <= 0:
+            size = 1200
+        if overlap < 0:
+            overlap = 0
+        if overlap >= size:
+            overlap = max(0, size - 1)
+
+        step = max(1, size - overlap)
+        chunks: List[str] = []
+        start = 0
+        n = len(data)
+        while start < n:
+            end = min(n, start + size)
+            chunk = data[start:end].strip()
+            if chunk:
+                chunks.append(chunk)
+            if end >= n:
+                break
+            start += step
+        return chunks
 
     def __init__(self, base_dir: str) -> None:
         self.base_dir = base_dir
@@ -115,11 +147,37 @@ class LargeDocumentManager:
         # Persist raw extracted text for debugging/inspection
         self._write_raw_text(store_dir, clean_text)
 
-        splitter = RecursiveCharacterTextSplitter(
-            chunk_size=chunk_size,
-            chunk_overlap=chunk_overlap,
-        )
-        raw_chunks = splitter.split_text(clean_text)
+        # Import text splitter lazily to avoid importing heavy deps at startup
+        splitter = None
+        splitter_import_error: Optional[BaseException] = None
+        try:
+            from langchain_text_splitters import RecursiveCharacterTextSplitter  # type: ignore
+            splitter = RecursiveCharacterTextSplitter(
+                chunk_size=chunk_size,
+                chunk_overlap=chunk_overlap,
+            )
+        except Exception as e1:
+            splitter_import_error = e1
+            try:
+                from langchain.text_splitter import RecursiveCharacterTextSplitter  # type: ignore
+                splitter = RecursiveCharacterTextSplitter(
+                    chunk_size=chunk_size,
+                    chunk_overlap=chunk_overlap,
+                )
+            except Exception as e2:
+                splitter_import_error = e2
+
+        if splitter is not None:
+            raw_chunks = splitter.split_text(clean_text)
+        else:
+            if splitter_import_error is not None:
+                print(f"Text splitter import failed, using fallback chunker: {splitter_import_error}")
+            raw_chunks = self._fallback_split_text(clean_text, chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+            if not raw_chunks and splitter_import_error is not None:
+                raise RuntimeError(
+                    f"Text splitter unavailable and fallback chunker produced no chunks. "
+                    f"Splitter import error: {splitter_import_error}"
+                ) from splitter_import_error
         print(f"Created {len(raw_chunks)} raw chunks")
         documents: List[Document] = [
             Document(page_content=chunk, metadata={"source": file_path, "chunk_index": idx})
@@ -151,17 +209,45 @@ class LargeDocumentManager:
                     else:
                         print(f"Warning: Could not remove old qdrant_dir: {cleanup_err}")
         
-        vector_store = None
+        client = None
         try:
             print("Creating Qdrant vector store")
-            # Let Qdrant.from_documents create the client internally
-            vector_store = Qdrant.from_documents(
-                documents=documents,
-                embedding=embeddings,
-                path=qdrant_dir,
-                collection_name=f"doc_{doc_key}",
-                force_recreate=True,
+            # Use QdrantClient directly to avoid langchain compatibility issues
+            client = QdrantClient(path=qdrant_dir)
+            collection_name = f"doc_{doc_key}"
+            
+            # Get embedding dimension from first document
+            sample_embedding = embeddings.embed_query(documents[0].page_content[:100])
+            embedding_dim = len(sample_embedding)
+            
+            # Create or recreate collection
+            try:
+                client.delete_collection(collection_name)
+            except Exception:
+                pass
+            
+            client.create_collection(
+                collection_name=collection_name,
+                vectors_config=VectorParams(size=embedding_dim, distance=Distance.COSINE),
             )
+            
+            # Add documents with embeddings
+            texts = [doc.page_content for doc in documents]
+            metadatas = [doc.metadata for doc in documents]
+            vectors = embeddings.embed_documents(texts)
+            
+            # Upload points
+            from qdrant_client.models import PointStruct
+            points = [
+                PointStruct(
+                    id=idx,
+                    vector=vector,
+                    payload={"page_content": text, "metadata": metadata}
+                )
+                for idx, (vector, text, metadata) in enumerate(zip(vectors, texts, metadatas))
+            ]
+            client.upsert(collection_name=collection_name, points=points)
+            
             used_backend = "qdrant"
             print("Qdrant vector store created successfully")
         except Exception as e:
@@ -170,13 +256,11 @@ class LargeDocumentManager:
             ) from e
         finally:
             # Close the client to release locks
-            if vector_store is not None:
-                client = getattr(vector_store, "client", None) or getattr(vector_store, "_client", None)
-                if client is not None and hasattr(client, "close"):
-                    try:
-                        client.close()
-                    except Exception:
-                        pass
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
             # Small delay to ensure Windows releases file locks
             time.sleep(0.2)
 
@@ -231,13 +315,26 @@ class LargeDocumentManager:
         try:
             embeddings = self._embedding()
             qdrant_client = QdrantClient(path=qdrant_dir)
-
-            vector_store = Qdrant(
-                client=qdrant_client,
-                collection_name=f"doc_{doc_key}",
-                embeddings=embeddings,
+            collection_name = f"doc_{doc_key}"
+            
+            # Embed the query
+            query_vector = embeddings.embed_query(query)
+            
+            # Search using QdrantClient directly
+            search_results = qdrant_client.search(
+                collection_name=collection_name,
+                query_vector=query_vector,
+                limit=max(1, int(k)),
             )
-            results = vector_store.similarity_search(query, k=max(1, int(k)))
+            
+            # Convert results to Document objects
+            results = []
+            for hit in search_results:
+                payload = hit.payload or {}
+                page_content = payload.get("page_content", "")
+                metadata = payload.get("metadata", {})
+                results.append(Document(page_content=page_content, metadata=metadata))
+            
             return results
         except Exception as e:
             print(f"Error retrieving context from Qdrant: {e}")
@@ -279,15 +376,25 @@ class LargeDocumentManager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _embedding(self) -> HuggingFaceEmbeddings:
+    def _embedding(self) -> Any:
         print("Initializing HuggingFaceEmbeddings with all-MiniLM-L6-v2")
         model_kwargs = {}
         try:
-            if torch is not None and torch.cuda.is_available():
-                model_kwargs = {"device": "cuda"}
+            import torch  # type: ignore
+            try:
+                if torch.cuda.is_available():
+                    model_kwargs = {"device": "cuda"}
+            except Exception:
+                pass
         except Exception:
             pass
         # Force cache to app-specific models dir so we can bundle/copy for offline use
+        # Import HuggingFaceEmbeddings lazily to avoid importing transformers/torch at startup
+        try:
+            from langchain_huggingface import HuggingFaceEmbeddings  # type: ignore
+        except Exception as e:
+            raise RuntimeError("langchain-huggingface not available. Please install 'langchain-huggingface'.") from e
+
         return HuggingFaceEmbeddings(
             model_name="sentence-transformers/all-MiniLM-L6-v2",
             cache_folder=self.models_dir,
