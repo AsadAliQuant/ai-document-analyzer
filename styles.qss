@@ -1,0 +1,154 @@
+/*
+  Custom Palette (Only these colors used):
+  --white:       #fdffffff;
+  --madder:      #b10f2e;
+  --rosewood:    #570000;
+  --black-bean:  #280000;
+  --burnt-sienna:#de7c5a;
+*/
+
+QWidget {
+    background-color: #fdffffff; /* white */
+    color: #280000; /* black-bean */
+    font-size: 14px;
+}
+
+/* Buttons */
+QPushButton {
+    background-color: #de7c5a; /* burnt-sienna */
+    color: #fdffffff; /* white */
+    padding: 8px 12px;
+    border-radius: 6px;
+    border: 1px solid #570000; /* rosewood */
+}
+
+QPushButton:hover {
+    background-color: #b10f2e; /* madder */
+    border-color: #570000; /* rosewood */
+}
+
+QPushButton:pressed {
+    background-color: #570000; /* rosewood */
+}
+
+QPushButton:disabled {
+    background-color: #fdffffff; /* white */
+    color: #570000; /* rosewood */
+    border-color: #570000; /* rosewood */
+}
+
+QPushButton:focus {
+    outline: none;
+    border: 2px solid #b10f2e; /* madder */
+}
+
+/* Inputs */
+QPlainTextEdit, QTextEdit, QLineEdit, QComboBox, QListWidget {
+    background-color: #fdffffff; /* white */
+    color: #280000; /* black-bean */
+    border: 1px solid #570000; /* rosewood */
+    border-radius: 6px;
+}
+
+QPlainTextEdit:focus, QTextEdit:focus, QLineEdit:focus, QComboBox:focus, QListWidget:focus {
+    border: 2px solid #b10f2e; /* madder */
+}
+
+/* Text selection */
+*::selection {
+    background-color: #b10f2e; /* madder */
+    color: #fdffffff; /* white */
+}
+
+/* Tabs */
+QTabBar::tab {
+    background: #fdffffff; /* white */
+    color: #280000; /* black-bean */
+    padding: 8px 12px;
+    border: 1px solid #570000; /* rosewood */
+    border-bottom: none;
+    margin-right: 2px;
+    min-width: 100px;
+    border-top-left-radius: 6px;
+    border-top-right-radius: 6px;
+}
+
+QTabBar::tab:hover {
+    background: #de7c5a; /* burnt-sienna */
+    color: #fdffffff; /* white */
+}
+
+QTabBar::tab:selected {
+    background: #fdffffff; /* white */
+    color: #280000; /* black-bean */
+    border-bottom: 1px solid #fdffffff; /* white */
+    border-top: 3px solid #b10f2e; /* madder */
+}
+
+QTabWidget::pane {
+    border: 1px solid #570000; /* rosewood */
+    background: #fdffffff; /* white */
+    top: -1px;
+    border-radius: 6px;
+}
+
+/* Lists */
+QListWidget {
+    padding: 4px;
+}
+
+QListWidget::item {
+    padding: 8px 10px;
+    border-radius: 4px;
+}
+
+QListWidget::item:hover {
+    background-color: #de7c5a; /* burnt-sienna */
+    color: #fdffffff; /* white */
+}
+
+QListWidget::item:selected {
+    background-color: #b10f2e; /* madder */
+    color: #fdffffff; /* white */
+}
+
+/* Scrollbars */
+QScrollBar:vertical {
+    background: transparent;
+    width: 10px;
+    margin: 2px;
+}
+
+QScrollBar::handle:vertical {
+    background: #570000; /* rosewood */
+    min-height: 24px;
+    border-radius: 5px;
+}
+
+QScrollBar::handle:vertical:hover {
+    background: #b10f2e; /* madder */
+}
+
+QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+    height: 0px;
+}
+
+QScrollBar:horizontal {
+    background: transparent;
+    height: 10px;
+    margin: 2px;
+}
+
+QScrollBar::handle:horizontal {
+    background: #570000; /* rosewood */
+    min-width: 24px;
+    border-radius: 5px;
+}
+
+QScrollBar::handle:horizontal:hover {
+    background: #b10f2e; /* madder */
+}
+
+QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+    width: 0px;
+}
