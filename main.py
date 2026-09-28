@@ -40,10 +40,20 @@ from PyQt6.QtGui import QIcon
 from main_window import MainWindow
 from auth import refresh as auth_refresh, get_stored_refresh_token
 
-DEFAULT_API_BASE_URL = "https://ssma.sa/ai_api"
+DEFAULT_API_BASE_URL = "https://ssma.sa/console/api"
+
+
+def _asset_path(*parts) -> str:
+    """Resolve a path under the bundled assets dir for both source runs and PyInstaller EXEs."""
+    if getattr(sys, "frozen", False):
+        base_dir = getattr(sys, "_MEIPASS", None) or os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, *parts)
+
 
 def _load_api_base_url() -> str:
-    # Prefer user-specific config in %APPDATA% if present
+    # 1. Prefer user-specific config in %APPDATA% if present
     try:
         appdata = os.getenv("APPDATA") or os.path.expanduser("~")
         cfg_dir = os.path.join(appdata, "AI Document Analyzer")
@@ -56,7 +66,18 @@ def _load_api_base_url() -> str:
                 return str(base).rstrip("/")
     except Exception:
         pass
-    # Fallback to local config.json
+    # 2. Check bundled config.json inside PyInstaller _MEIPASS (--onefile extracts here)
+    try:
+        bundled_cfg = _asset_path("config.json")
+        if os.path.exists(bundled_cfg):
+            with open(bundled_cfg, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            base = cfg.get("API_BASE_URL")
+            if base:
+                return str(base).rstrip("/")
+    except Exception:
+        pass
+    # 3. Fallback to config.json in CWD (development runs)
     try:
         with open("config.json", "r", encoding="utf-8") as f:
             cfg = json.load(f)
@@ -65,9 +86,11 @@ def _load_api_base_url() -> str:
     except Exception:
         return DEFAULT_API_BASE_URL
 
+
 if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
+    app.setWindowIcon(QIcon(_asset_path("assets", "app-icon-logo.jpeg")))
     # Load global light stylesheet if present
     try:
         with open("styles.qss", "r", encoding="utf-8") as f:

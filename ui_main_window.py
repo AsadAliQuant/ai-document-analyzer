@@ -20,6 +20,7 @@ def _is_windows_dark_mode() -> bool:
 class DropArea(QtWidgets.QWidget):
     fileDropped = QtCore.pyqtSignal(str)
     browseRequested = QtCore.pyqtSignal()
+    clearRequested = QtCore.pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -67,6 +68,15 @@ class DropArea(QtWidgets.QWidget):
         self._update_style()
         self._apply_label_theme()  # Apply initial theme-aware label color
 
+        # Close button — absolutely positioned at top-right corner, no layout parent
+        self._closeButton = QtWidgets.QPushButton("✕", self)
+        self._closeButton.setObjectName("dropAreaCloseBtn")
+        self._closeButton.setFixedSize(22, 22)
+        self._closeButton.setToolTip("Remove selected file")
+        self._closeButton.setCursor(QtGui.QCursor(QtCore.Qt.CursorShape.PointingHandCursor))
+        self._closeButton.setVisible(False)
+        self._closeButton.clicked.connect(self._on_close_clicked)
+
     def sizeHint(self) -> QtCore.QSize:  # type: ignore[override]
         return QtCore.QSize(0, self._preferred_height)
 
@@ -90,6 +100,17 @@ class DropArea(QtWidgets.QWidget):
             self._label.setText(self._default_label_text)
         # Reapply theme to ensure correct text color
         self._apply_label_theme()
+        self._closeButton.setVisible(bool(name))
+
+    def _on_close_clicked(self):
+        self._label.setText(self._default_label_text)
+        self._apply_label_theme()
+        self._closeButton.setVisible(False)
+        self.clearRequested.emit()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._closeButton.move(self.width() - self._closeButton.width() - 8, 8)
 
     def _apply_label_theme(self):
         """Apply theme-aware text color to the label based on Windows dark/light mode."""
@@ -132,20 +153,34 @@ class DropArea(QtWidgets.QWidget):
     def _update_style(self):
         dark_mode = _is_windows_dark_mode()
         if dark_mode:
-            # Dark mode: dark background, white dashed border
             bg = "#3a3a3a" if self._is_drag_over else "#2d2d2d"
             border_color = "#FFFFFF"
+            btn_bg    = "#666666"
+            btn_fg    = "#FFFFFF"
+            btn_hover = "#888888"
         else:
-            # Light mode: light background, dark dashed border
             bg = "#fff8f2" if self._is_drag_over else "#fdffffff"
             border_color = "#570000"
-        # Use DropArea selector to ensure styles apply to this widget specifically
+            btn_bg    = "#888888"
+            btn_fg    = "#FFFFFF"
+            btn_hover = "#666666"
         self.setStyleSheet(
             f"DropArea {{"
             f"  border: 2px dashed {border_color};"
             f"  padding: 80px;"
             f"  border-radius: 8px;"
             f"  background-color: {bg};"
+            f"}}"
+            f"#dropAreaCloseBtn {{"
+            f"  background-color: {btn_bg};"
+            f"  color: {btn_fg};"
+            f"  border: none;"
+            f"  border-radius: 11px;"
+            f"  font-size: 11px;"
+            f"  font-weight: bold;"
+            f"}}"
+            f"#dropAreaCloseBtn:hover {{"
+            f"  background-color: {btn_hover};"
             f"}}"
         )
 

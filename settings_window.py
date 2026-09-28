@@ -1,11 +1,11 @@
-from PyQt6.QtWidgets import QDialog
-from PyQt6.QtCore import QSettings
-from PyQt6.QtCore import QEvent
+from PyQt6.QtWidgets import QDialog, QLineEdit
+from PyQt6.QtCore import QSettings, QEvent, QSize
 from PyQt6.QtGui import QGuiApplication
 import json
 import os
 import shutil
 from ui_settings_window import Ui_SettingsWindow
+from login_overlay import _EYE_SVG, _EYE_OFF_SVG, _svg_to_icon
 
 
 class SettingsWindow(QDialog):
@@ -24,6 +24,11 @@ class SettingsWindow(QDialog):
 
         # Wire actions
         self.ui.saveButton.clicked.connect(self._save_settings)
+        # Eye toggle for API key
+        if hasattr(self.ui, 'toggleApiKeyBtn'):
+            self.ui.toggleApiKeyBtn.setIcon(_svg_to_icon(_EYE_SVG))
+            self.ui.toggleApiKeyBtn.setIconSize(QSize(18, 18))
+            self.ui.toggleApiKeyBtn.clicked.connect(self._toggle_api_key_visibility)
         # Language toggle
         if hasattr(self.ui, 'toggleLanguageButton'):
             self.ui.toggleLanguageButton.clicked.connect(self._toggle_language)
@@ -69,6 +74,16 @@ class SettingsWindow(QDialog):
         except Exception:
             pass
         self.accept()
+
+    def _toggle_api_key_visibility(self):
+        edit = self.ui.geminiKeyEdit
+        btn = self.ui.toggleApiKeyBtn
+        if edit.echoMode() == QLineEdit.EchoMode.Password:
+            edit.setEchoMode(QLineEdit.EchoMode.Normal)
+            btn.setIcon(_svg_to_icon(_EYE_OFF_SVG))
+        else:
+            edit.setEchoMode(QLineEdit.EchoMode.Password)
+            btn.setIcon(_svg_to_icon(_EYE_SVG))
 
     def _toggle_language(self):
         current = getattr(self, "_current_lang", "en")

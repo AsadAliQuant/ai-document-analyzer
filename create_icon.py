@@ -37,8 +37,8 @@ try:
             print(f"Error creating ICO: {e}")
             return False
     
-    # Convert logo.png to logo.ico
-    png_file = "assets/logo.png"
+    # Convert app-icon-logo.jpeg to logo.ico
+    png_file = "assets/app-icon-logo.jpeg"
     ico_file = "assets/logo.ico"
     
     if create_ico_from_png(png_file, ico_file):

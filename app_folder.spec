@@ -178,6 +178,9 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    uac_admin=False,
+    uac_uiaccess=False,
+    manifest='manifest.xml',
     icon='assets/logo.ico' if os.path.exists('assets/logo.ico') else None,
 )
 

@@ -15,7 +15,7 @@ class LoginDialog(QDialog):
         self.password_edit = QLineEdit()
         self.password_edit.setPlaceholderText("Password")
         self.password_edit.setEchoMode(QLineEdit.EchoMode.Password)
-        self.password_edit.setStyleSheet("padding: 10px;")
+        self.password_edit.setStyleSheet("padding: 10px; color: #280000;")
         self.status_label = QLabel("")
         self.login_btn = QPushButton("Login")
         self.cancel_btn = QPushButton("Cancel")

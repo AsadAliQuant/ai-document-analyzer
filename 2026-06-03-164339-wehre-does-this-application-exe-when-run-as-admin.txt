@@ -1,0 +1,157 @@
+ ▐▛███▜▌   Claude Code v2.1.153
+▝▜█████▛▘  Opus 4.7 · Claude Pro
+  ▘▘ ▝▝    F:\Asad\Talha Projects\ai-document-analyzer
+
+
+> wehre does this application exe when run as admin stores files and folder in  
+  users pc? in which locaton                                                    
+
+● Looking at the CLAUDE.md and let me verify by checking the actual code.
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+● When run as admin, the app writes to the launching user's roaming AppData —
+  UAC elevation runs in the same user context, so %APPDATA% still resolves to
+  that user's profile (not C:\Users\Administrator).
+
+  Base folder:
+  C:\Users\<YourUser>\AppData\Roaming\AI Document Analyzer\
+  On your machine that's C:\Users\Asad\AppData\Roaming\AI Document Analyzer\.
+
+  What lives there (from main.py, main_window.py, large_doc_manager.py,
+  lock_manager.py, license_manager.py):
+
+  ┌─────────────────┬───────────────────────────────────────────────────────┐
+  │      Path       │                        Purpose                        │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ config.json     │ User config (Gemini key, language) — copied from EXE  │
+  │                 │ folder on first run (main.py:46-49)                   │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ vector_store/   │ Qdrant embedded DB for RAG chunks (per CLAUDE.md      │
+  │                 │ Document Processing Pipeline)                         │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ models/         │ Bundled offline models copied here on first run       │
+  │                 │ (main_window.py:1869)                                 │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ cache.txt       │ Fernet-encrypted lock state (lock_manager.py:24-25)   │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ License state   │ From license_manager.py:38-39                         │
+  │ file            │                                                       │
+  ├─────────────────┼───────────────────────────────────────────────────────┤
+  │ App log file    │ Created at startup (main.py:21)                       │
+  └─────────────────┴───────────────────────────────────────────────────────┘
+
+  Caveats
+  - If %APPDATA% is somehow unset, it falls back to os.path.expanduser("~")
+  (user home).
+  - Refresh token is not in that folder — it's stored in Windows Credential
+  Manager via the keyring library under service name ai_document_analyzer
+  (auth.py).
+  - The bundled offline models source ships next to the EXE in ./models/, then
+  offline_bootstrap.py copies them into the AppData models/ subfolder on first
+  launch.
+
+✻ Brewed for 19s
+
+> if I delte all the contents of this folder and this                           
+  fodlerC:\Users\Asad\AppData\Roaming\AI Document Analyzer\, then on next exe   
+  application lauch it will recereate the files nad folders, right?             
+
+  Read 2 files (ctrl+o to expand)
+
+● Yes — the folder and its core files get recreated automatically on next 
+  launch. Confirmed from the code:
+
+  Auto-recreated:
+  - AI Document Analyzer\ folder itself — main.py:23 (os.makedirs(log_dir, 
+  exist_ok=True))
+  - config.json — copied from the EXE's resource dir on first run
+  (main_window.py:2402-2416)
+  - app.log — opened in append mode at startup (main.py:28)
+  - vector_store/ — Qdrant creates it on first document processing
+  - models/ — offline_bootstrap.py re-copies bundled models from ./models/ next
+  to the EXE
+  - cache.txt (lock state) — lock_manager.py re-fetches and re-encrypts on next
+  poll
+
+  What you'll lose (these don't auto-recreate to prior state):
+  - Your Gemini API key and language setting → wiped, you'll have to re-enter in
+   Settings (unless config.json next to the EXE has them).
+  - Vector store → every previously-ingested document will need to be
+  re-processed/re-embedded on next open (slow for large PDFs).
+  - App log history.
+
+  What survives deletion (stored elsewhere):
+  - Your login / refresh token → it's in Windows Credential Manager (keyring,
+  service ai_document_analyzer), not in that folder. You'll stay signed in.
+
+  So safe to delete as a reset — just expect a one-time slow re-embed of any
+  documents you reload and to re-enter the Gemini key.
+
+✻ Brewed for 18s
+
+> in the pc which I was developing the application, I can login and logout .    
+  but when I copied the exact same copy to another pc for tsting the login dont 
+   works? and syas wrong login pasword? why is that?                            
+
+● Let me check the auth code to diagnose this.
+
+  Read 2 files (ctrl+o to expand)
+
+● Most likely it's a mismatched API_BASE_URL between the two PCs — the server is
+   rejecting the password because the test PC is hitting a different backend
+  than your dev PC, where that account simply doesn't exist (or has a different
+  password).
+
+  The 401 "Invalid username or password" string comes from auth.py:62, which
+  only fires after the request reaches the server. So the network call works —
+  the server just doesn't recognize that account.
+
+  Where the URL comes from (priority order, per main.py:45-66):
+  1. %APPDATA%\AI Document Analyzer\config.json → API_BASE_URL
+  2. config.json next to the EXE → API_BASE_URL
+  3. Fallback default: https://ssma.sa/ai_api
+
+  The likely scenarios:
+
+  Scenario: Dev PC has a stale/dev config.json in %APPDATA% pointing to a
+    local/staging backend (e.g. http://localhost:8000 or a dev server) where
+  your
+     test account lives
+  What's happening: Test PC falls back to prod https://ssma.sa/ai_api where the
+    account doesn't exist or has a different password
+  ────────────────────────────────────────
+  Scenario: Test PC has an old %APPDATA%\AI Document Analyzer\config.json from a
+
+    prior version pointing to a wrong backend
+  What's happening: New EXE doesn't overwrite it because the file already exists
+
+    (main_window.py:2404 only copies if missing)
+  ────────────────────────────────────────
+  Scenario: You created the test account on dev backend only
+  What's happening: Prod backend has no such user
+
+  How to verify in 30 seconds:
+
+  1. On both PCs open: C:\Users\<user>\AppData\Roaming\AI Document 
+  Analyzer\config.json
+  2. Compare the API_BASE_URL value.
+  3. Also check config.json next to the EXE on both PCs.
+
+  Fix options:
+  - Delete %APPDATA%\AI Document Analyzer\config.json on the test PC, ship a
+  fresh config.json next to the EXE with the correct API_BASE_URL, and relaunch
+  — it'll get copied over.
+  - Or just create the user account on whichever backend the test PC is actually
+   pointing to.
+
+  Other less likely causes (rule them out only if URLs match):
+  - Caps Lock / keyboard layout on test PC silently mangling the password (e.g.
+  AZERTY vs QWERTY, Arabic IME swallowing chars).
+  - Trailing whitespace if you pasted the password — auth.py:43 sends it raw (no
+   .strip() on password, only email at login_dialog.py:35).
+  - Backend has an IP/region block on the test PC's network.
+
+  Start by diffing the two config.json files — that's almost certainly it.
+
+✻ Worked for 31s

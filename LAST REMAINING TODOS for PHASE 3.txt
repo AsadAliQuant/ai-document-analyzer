@@ -1,0 +1,14 @@
+✅ add eye icon to the gemini api key field also
+✅ fix the setting dialog popup so, as currently we have too much white space in between elements of it, as seen in the attached image.
+
+fix the chat area it shows the boxes when application is lauched and after each other buttons click like 4 5 times that chat area gets more lighter in color representing that its disabled right now.
+
+✅ add close icon (at top right corner of bordered area) to the 'click to choose a ...' area so that curently selected file can get unselected.
+
+✅ fix login buttons in the sign in area
+
+✅ when in light mode: login buton should be black (exactly same color used for analyze document now button when user logs in) and exit button should be red (exactly same color as of logout button when user is logged in)
+
+✅ when in dark mode: login buton should be white and exit button should be red (exactly same color as of logout button when user is logged in)
+
+✅ make the login and exit buttons a little bigger in line height, their width is correct.

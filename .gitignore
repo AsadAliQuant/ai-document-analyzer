@@ -3,6 +3,7 @@ build/
 dist/
 models/
 .git/
+ai-document-analyzer_AfterPhase2Delivered/
 
 # Virtual environments
 .venv/

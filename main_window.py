@@ -7,7 +7,6 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLineEdit,
-    QGraphicsOpacityEffect,
     QMainWindow,
     QMessageBox,
     QPushButton,
@@ -30,9 +29,12 @@ import base64
 import mimetypes
 import locale
 from startup_helper import InitializationWorker, LoadingOverlayMixin
+from login_dialog import LoginDialog
+from login_overlay import LoginOverlay, LogoutOverlay
 from lock_manager import LockManager
 from lock_overlay import LockOverlay
-from login_overlay import LoginOverlay
+from license_manager import LicenseManager
+from license_overlay import LicenseOverlay
 from auth import AuthState, clear_tokens
 
 # Windows theme detection
@@ -116,6 +118,13 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             self.lock_overlay.set_custom_message(self.lock_manager.get_lock_message())
             self.lock_overlay.show_overlay()
 
+        # Initialize license system
+        self.license_manager = LicenseManager(self._get_api_base_url_fallback())
+        self.license_overlay = LicenseOverlay(self, support_email="support@ssma.sa")
+        self.license_manager.license_valid.connect(self._on_license_valid)
+        self.license_manager.license_invalid.connect(self._on_license_invalid)
+        self.license_manager.license_warning.connect(self._on_license_warning)
+        self.license_overlay.logout_requested.connect(self._on_logout_clicked)
         # Settings Window
         self.settings_window = SettingsWindow(self)
         # Language/status state
@@ -185,6 +194,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             try:
                 self.ui.dropArea.fileDropped.connect(self._on_file_dropped)
                 self.ui.dropArea.browseRequested.connect(self.choose_file)
+                self.ui.dropArea.clearRequested.connect(self._on_clear_file_clicked)
             except Exception:
                 pass
 
@@ -239,6 +249,9 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self._analyze_button_base = self._get_analyze_button_text()
         self._analysis_thread = None
         self._analysis_worker = None
+        self._logout_overlay = LogoutOverlay(self)
+        self._session_id = 0
+
         # NOTE: Refresh state is initialized earlier; do not reset here to avoid
         # losing in-flight refresh state or leaving UI stuck in loading.
 
@@ -291,12 +304,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         if hasattr(self.ui, 'rightLayout'):
             self.ui.rightLayout.addWidget(self.ui.qaGroup)
 
-        # Disabled until a summary is generated
-        self._qa_opacity_effect = QGraphicsOpacityEffect(self.ui.qaGroup)
-        try:
-            self.ui.qaGroup.setGraphicsEffect(self._qa_opacity_effect)
-        except Exception:
-            pass
+        # Disabled until a summary is generated (native disable — no graphics effect)
+        self._set_qa_group_enabled(False)
         self.ui.questionLineEdit.returnPressed.connect(self._send_question)
         self.ui.sendQuestionButton.clicked.connect(self._send_question)
         self.ui.clearChatButton.clicked.connect(self._clear_chat)
@@ -368,6 +377,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             pass
 
     def _on_login_success(self) -> None:
+        self._session_id += 1
         try:
             if getattr(self, "_login_overlay", None):
                 self._login_overlay.hide_overlay()
@@ -375,6 +385,11 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             pass
         try:
             self._update_user_strip()
+        except Exception:
+            pass
+        # Always check license immediately after every login
+        try:
+            self.license_manager.check_now()
         except Exception:
             pass
 
@@ -395,6 +410,16 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
 
     def _on_logout_clicked(self) -> None:
         try:
+            self._logout_overlay.show_overlay()
+        except Exception:
+            pass
+        
+        # Allow UI to paint overlay before blocking main thread
+        QTimer.singleShot(50, self._perform_logout_cleanup)
+
+    def _perform_logout_cleanup(self) -> None:
+        self._cancel_all_background_work()
+        try:
             clear_tokens()
         except Exception:
             pass
@@ -411,8 +436,48 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             self.show_login_overlay(base)
         except Exception:
             pass
+        try:
+            self._logout_overlay.hide_overlay()
+        except Exception:
+            pass
+
+    def _cancel_all_background_work(self) -> None:
+        self._pending_analysis_params = None
+        
+        def _cancel_thread(thread, worker):
+            if thread and thread.isRunning():
+                thread.requestInterruption()
+                if worker:
+                    try:
+                        worker.finished.disconnect()
+                    except Exception:
+                        pass
+                    try:
+                        worker.error.disconnect()
+                    except Exception:
+                        pass
+                thread.wait(2000)
+
+        _cancel_thread(self._analysis_thread, self._analysis_worker)
+        self._analysis_thread = None
+        self._analysis_worker = None
+
+        _cancel_thread(self._processing_thread, getattr(self, '_processing_worker', None))
+        self._processing_thread = None
+        self._processing_worker = None
+
+        _cancel_thread(self._qa_thread, getattr(self, '_qa_worker', None))
+        self._qa_thread = None
+        self._qa_worker = None
+
 
     def _reset_user_session_state(self) -> None:
+        try:
+            self._set_loading(False)
+            is_ar = getattr(self, '_current_lang', 'en') == 'ar'
+            self._set_status("جاهز" if is_ar else "Ready")
+        except Exception:
+            pass
         try:
             self._last_summary_text = ""
         except Exception:
@@ -463,6 +528,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             pass
 
     def _get_api_base_url_fallback(self) -> str:
+        # 1. Prefer user-specific config in %APPDATA%
         try:
             import json as _json
             import os as _os
@@ -477,6 +543,23 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                     return str(base).rstrip("/")
         except Exception:
             pass
+        # 2. Check bundled config.json inside PyInstaller _MEIPASS (--onefile)
+        try:
+            import json as _json
+            if getattr(sys, 'frozen', False):
+                _meipass = getattr(sys, '_MEIPASS', None) or os.path.dirname(sys.executable)
+            else:
+                _meipass = os.path.dirname(os.path.abspath(__file__))
+            bundled_cfg = os.path.join(_meipass, "config.json")
+            if os.path.exists(bundled_cfg):
+                with open(bundled_cfg, "r", encoding="utf-8") as f:
+                    cfg = _json.load(f)
+                base = cfg.get("API_BASE_URL")
+                if base:
+                    return str(base).rstrip("/")
+        except Exception:
+            pass
+        # 3. Fallback to config.json in CWD (development runs)
         try:
             import json as _json
             if os.path.exists("config.json"):
@@ -487,7 +570,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                     return str(base).rstrip("/")
         except Exception:
             pass
-        return "https://ssma.sa/ai_api"
+        return "https://ssma.sa/console/api"
 
     # Override init-finished hook to stop the overlay's loading animation
     def _on_init_finished(self):
@@ -592,7 +675,13 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         except Exception:
             pass
 
-    # Removed clear-file handler (feature reverted)
+    def _on_clear_file_clicked(self) -> None:
+        self._selected_file_path = ""
+        try:
+            if hasattr(self.ui, 'saveImageAsPdfButton'):
+                self.ui.saveImageAsPdfButton.setVisible(False)
+        except Exception:
+            pass
 
     def analyze_document(self):
         # Check if initialization completed successfully
@@ -1041,16 +1130,10 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             pass
 
     def _set_qa_group_enabled(self, enabled: bool):
-        # Enable/disable interactivity
+        # Native enable/disable on the whole group. No QGraphicsOpacityEffect:
+        # the effect's off-screen buffer produced the white/red box artifacts and
+        # the progressive-fade. setEnabled() is idempotent and buffer-free.
         self.ui.qaGroup.setEnabled(enabled)
-        # Apply a faded look when disabled
-        try:
-            if not hasattr(self, '_qa_opacity_effect') or self._qa_opacity_effect is None:
-                self._qa_opacity_effect = QGraphicsOpacityEffect(self.ui.qaGroup)
-                self.ui.qaGroup.setGraphicsEffect(self._qa_opacity_effect)
-            self._qa_opacity_effect.setOpacity(1.0 if enabled else 0.4)
-        except Exception:
-            pass
 
     def _is_large_document(self, file_path: str) -> bool:
         """Check if document is large (more than 2 pages for PDF, or similar logic)."""
@@ -1108,7 +1191,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
     def _start_pasted_text_processing(self, doc_key: str, text: str):
         """Start background processing for pasted text with RAG chunking."""
         self._processing_thread = QThread(self)
-        self._processing_worker = PastedTextProcessWorker(self, doc_key, text)
+        self._processing_worker = PastedTextProcessWorker(self, doc_key, text, self._session_id)
         self._processing_worker.moveToThread(self._processing_thread)
         self._processing_thread.started.connect(self._processing_worker.run)
         self._processing_worker.finished.connect(self._on_large_doc_processing_finished)
@@ -1121,7 +1204,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
     def _start_large_doc_processing(self, file_path: str, doc_key: str, is_image: bool = False):
         """Start background processing for large documents or images with OCR."""
         self._processing_thread = QThread(self)
-        self._processing_worker = LargeDocProcessWorker(self, file_path, doc_key, is_image=is_image)
+        self._processing_worker = LargeDocProcessWorker(self, file_path, doc_key, self._session_id, is_image=is_image)
         self._processing_worker.moveToThread(self._processing_thread)
         self._processing_thread.started.connect(self._processing_worker.run)
         self._processing_worker.finished.connect(self._on_large_doc_processing_finished)
@@ -1131,8 +1214,10 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self._processing_thread.finished.connect(self._processing_thread.deleteLater)
         self._processing_thread.start()
 
-    @pyqtSlot(str, int)
-    def _on_large_doc_processing_finished(self, doc_key: str, chunk_count: int):
+    @pyqtSlot(str, int, int)
+    def _on_large_doc_processing_finished(self, doc_key: str, chunk_count: int, session_id: int):
+        if session_id != self._session_id:
+            return
         """Handle successful large document processing."""
         self._set_loading(False)
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
@@ -1149,8 +1234,10 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             self._start_background_analysis(self._pending_analysis_params)
             self._pending_analysis_params = None
 
-    @pyqtSlot(str)
-    def _on_large_doc_processing_error(self, error_message: str):
+    @pyqtSlot(str, int)
+    def _on_large_doc_processing_error(self, error_message: str, session_id: int):
+        if session_id != self._session_id:
+            return
         """Handle large document processing error."""
         self._set_loading(False)
         self._pending_analysis_params = None
@@ -1196,7 +1283,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         }
 
         thread = QThread(self)
-        worker = _QAWorker(self, params)
+        worker = _QAWorker(self, params, self._session_id)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_qa_finished)
@@ -1208,14 +1295,20 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self._qa_worker = worker
         thread.start()
 
-    def _on_qa_finished(self, answer_text: str):
+    @pyqtSlot(str, int)
+    def _on_qa_finished(self, answer_text: str, session_id: int):
+        if session_id != self._session_id:
+            return
         self._append_chat("Assistant", answer_text or "(No answer)")
         if answer_text:
             self._append_history("assistant", answer_text)
         self._set_qa_controls_enabled(True)
         self._stop_qa_typing_indicator()
 
-    def _on_qa_error(self, error_message: str):
+    @pyqtSlot(str, int)
+    def _on_qa_error(self, error_message: str, session_id: int):
+        if session_id != self._session_id:
+            return
         if error_message:
             self._append_chat("Error", error_message)
             QMessageBox.critical(self, "Q&A Error", error_message)
@@ -1305,7 +1398,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
     def _start_background_analysis(self, params: dict):
         self._set_loading(True)
         thread = QThread(self)
-        worker = _AnalysisWorker(self, params)
+        worker = _AnalysisWorker(self, params, self._session_id)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_analysis_finished)
@@ -1318,8 +1411,16 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self._analysis_worker = worker
         thread.start()
 
-    @pyqtSlot(str, str, str, str)
-    def _on_analysis_finished(self, summary_text: str, status_text: str, notify_title: str, notify_message: str):
+    @pyqtSlot(str, str, str, str, str, str, int)
+    def _on_analysis_finished(self, summary_text: str, status_text: str, notify_title: str, notify_message: str, effective_text: str, doc_key: str, session_id: int):
+        if session_id != self._session_id:
+            return
+            
+        if effective_text:
+            self._qa_document_text = effective_text
+        if doc_key:
+            self._qa_vector_doc_key = doc_key
+            
         # Try to parse JSON and render a clean formatted HTML summary
         parsed = self._try_parse_summary_json(summary_text or "")
         if parsed is not None:
@@ -1344,8 +1445,10 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             self._set_status(status_text)
         self._set_loading(False)
 
-    @pyqtSlot(str, str)
-    def _on_analysis_error(self, status_text: str, error_message: str):
+    @pyqtSlot(str, str, int)
+    def _on_analysis_error(self, status_text: str, error_message: str, session_id: int):
+        if session_id != self._session_id:
+            return
         if error_message:
             QMessageBox.critical(self, "Analysis Error", error_message)
         if status_text:
@@ -2557,21 +2660,55 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
     def _on_lock_message_changed(self, message: str):
         """Handle lock message changes from the lock manager."""
         self.lock_overlay.set_custom_message(message)
-    
+
+    # ------------------------------------------------------------------
+    # License system handlers
+    # ------------------------------------------------------------------
+
+    def _on_license_valid(self):
+        """Called when license check passes — hide overlay if visible."""
+        try:
+            self.license_overlay.hide_overlay()
+        except Exception:
+            pass
+
+    def _on_license_invalid(self, info: dict):
+        """Called when license is expired, revoked, or missing — show blocking overlay."""
+        try:
+            self.license_overlay.update_info(info)
+            self.license_overlay.show_overlay()
+        except Exception:
+            pass
+
+    def _on_license_warning(self, days_left: int):
+        """Show a tray notification when license is close to expiry."""
+        try:
+            if self.tray_icon:
+                self.tray_icon.showMessage(
+                    "License Expiring Soon",
+                    f"Your license expires in {days_left} day{'s' if days_left != 1 else ''}. "
+                    "Contact support to renew.",
+                    QSystemTrayIcon.MessageIcon.Warning,
+                    8000,
+                )
+        except Exception:
+            pass
+
     def resizeEvent(self, event):
-        """Ensure lock overlay stays covering the entire window."""
+        """Ensure overlays stay covering the entire window on resize."""
         super().resizeEvent(event)
         if hasattr(self, 'lock_overlay') and self.lock_overlay.isVisible():
             self.lock_overlay.setGeometry(self.rect())
 
 class _AnalysisWorker(QObject):
-    finished = pyqtSignal(str, str, str, str)  # summary, status, notify_title, notify_message
-    error = pyqtSignal(str, str)  # status, error_message
+    finished = pyqtSignal(str, str, str, str, str, str, int)  # summary, status, notify_title, notify_message, effective_text, doc_key, session_id
+    error = pyqtSignal(str, str, int)  # status, error_message, session_id
 
-    def __init__(self, window: 'MainWindow', params: dict):
+    def __init__(self, window: 'MainWindow', params: dict, session_id: int):
         super().__init__()
         self.window = window
         self.params = params
+        self.session_id = session_id
 
     @pyqtSlot()
     def run(self):
@@ -2603,48 +2740,49 @@ class _AnalysisWorker(QObject):
                 elif file_path and not (input_text or "").strip():
                     # Extract text from file (includes OCR for images)
                     if not os.path.exists(file_path):
-                        self.error.emit("", f"File does not exist:\n{file_path}")
+                        self.error.emit("", f"File does not exist:\n{file_path}", self.session_id)
                         return
                     extracted = self.window.extract_text_from_file(file_path)
                     if not extracted:
-                        self.error.emit("", "Could not extract text from the selected file.")
+                        self.error.emit("", "Could not extract text from the selected file.", self.session_id)
                         return
                     input_text = extracted
             except Exception as e:
-                self.error.emit("", f"Failed to extract text from file:\n{e}")
+                self.error.emit("", f"Failed to extract text from file:\n{e}", self.session_id)
                 return
 
-            # Persist the effective document text for Q&A usage
+            # Determine effective document text and doc_key for Q&A
+            doc_key_out = ""
             try:
                 effective_text = (input_text or "").strip()
-                self.window._qa_document_text = effective_text
                 if doc_key and self.window.large_doc_manager.has_vector_store(doc_key):
-                    self.window._qa_vector_doc_key = doc_key
+                    doc_key_out = doc_key
             except Exception:
-                pass
+                effective_text = ""
 
             # For both ollama and gemini, use OCR text instead of vision models
             if provider == "ollama":
                 summary = self.window.summarize_text_offline(model, input_text)
-                self.finished.emit(summary or "(No response)", "Offline - Done", "Analysis Complete", "Your offline analysis has finished.")
+                self.finished.emit(summary or "(No response)", "Offline - Done", "Analysis Complete", "Your offline analysis has finished.", effective_text, doc_key_out, self.session_id)
                 return
             if provider == "gemini":
                 summary = self.window.summarize_text_gemini(model, input_text, gemini_key)
-                self.finished.emit(summary or "(No response)", "Online - Gemini Done", "Analysis Complete", "Your Gemini analysis has finished.")
+                self.finished.emit(summary or "(No response)", "Online - Gemini Done", "Analysis Complete", "Your Gemini analysis has finished.", effective_text, doc_key_out, self.session_id)
                 return
-            self.error.emit("", "Unknown provider")
+            self.error.emit("", "Unknown provider", self.session_id)
         except Exception as e:
-            self.error.emit("", str(e))
+            self.error.emit("", str(e), self.session_id)
 
 
 class _QAWorker(QObject):
-    finished = pyqtSignal(str)  # answer
-    error = pyqtSignal(str)  # error_message
+    finished = pyqtSignal(str, int)  # answer, session_id
+    error = pyqtSignal(str, int)  # error_message, session_id
 
-    def __init__(self, window: 'MainWindow', params: dict):
+    def __init__(self, window: 'MainWindow', params: dict, session_id: int):
         super().__init__()
         self.window = window
         self.params = params
+        self.session_id = session_id
 
     @pyqtSlot()
     def run(self):
@@ -2658,7 +2796,7 @@ class _QAWorker(QObject):
             doc_key = self.params.get("doc_key", "")
 
             if not model:
-                self.error.emit("No model selected for Q&A")
+                self.error.emit("No model selected for Q&A", self.session_id)
                 return
 
             # First, classify the question type in the background thread
@@ -2674,7 +2812,7 @@ class _QAWorker(QObject):
                     if qtype == "COUNT":
                         try:
                             count_result = self.window._handle_counting_question(question, doc_key)
-                            self.finished.emit(count_result or "")
+                            self.finished.emit(count_result or "", self.session_id)
                             return
                         except Exception:
                             # Fall back to normal RAG if counting fails
@@ -2685,26 +2823,28 @@ class _QAWorker(QObject):
 
             if provider == "ollama":
                 answer = self.window.answer_question_offline(model, messages, summary, input_text, doc_key)
-                self.finished.emit(answer or "")
+                self.finished.emit(answer or "", self.session_id)
                 return
             if provider == "gemini":
                 answer = self.window.answer_question_gemini(model, messages, summary, input_text, gemini_key, doc_key)
-                self.finished.emit(answer or "")
+                self.finished.emit(answer or "", self.session_id)
                 return
-            self.error.emit("Unknown provider for Q&A")
+            self.error.emit("Unknown provider for Q&A", self.session_id)
         except Exception as e:
-            self.error.emit(str(e))
+            self.error.emit(str(e), self.session_id)
+
 
 
 class LargeDocProcessWorker(QObject):
-    finished = pyqtSignal(str, int)
-    error = pyqtSignal(str)
+    finished = pyqtSignal(str, int, int)
+    error = pyqtSignal(str, int)
 
-    def __init__(self, window: 'MainWindow', file_path: str, doc_key: str, is_image: bool = False):
+    def __init__(self, window: 'MainWindow', file_path: str, doc_key: str, session_id: int, is_image: bool = False):
         super().__init__()
         self.window = window
         self.file_path = file_path
         self.doc_key = doc_key
+        self.session_id = session_id
         self.is_image = is_image
 
     @pyqtSlot()
@@ -2713,7 +2853,7 @@ class LargeDocProcessWorker(QObject):
         print(f"LargeDocProcessWorker.run started for {file_type}: {self.file_path}, doc_key: {self.doc_key}")
         try:
             if not os.path.exists(self.file_path):
-                self.error.emit(f"File does not exist:\n{self.file_path}")
+                self.error.emit(f"File does not exist:\n{self.file_path}", self.session_id)
                 return
             
             if self.is_image:
@@ -2726,9 +2866,9 @@ class LargeDocProcessWorker(QObject):
             
             if not text or not text.strip():
                 if self.is_image:
-                    self.error.emit("OCR could not extract any text from the image. The image may be blank or contain no readable text.")
+                    self.error.emit("OCR could not extract any text from the image. The image may be blank or contain no readable text.", self.session_id)
                 else:
-                    self.error.emit("Could not extract text from the file or file is empty.")
+                    self.error.emit("Could not extract text from the file or file is empty.", self.session_id)
                 return
             
             print(f"Calling prepare_document with {len(text)} characters")
@@ -2738,22 +2878,23 @@ class LargeDocProcessWorker(QObject):
                 text,
             )
             print(f"prepare_document completed, chunks: {chunk_count}")
-            self.finished.emit(self.doc_key, chunk_count)
+            self.finished.emit(self.doc_key, chunk_count, self.session_id)
         except Exception as e:
             print(f"Exception in LargeDocProcessWorker: {e}")
             error_msg = f"OCR processing failed: {str(e)}" if self.is_image else f"Processing failed: {str(e)}"
-            self.error.emit(error_msg)
+            self.error.emit(error_msg, self.session_id)
 
 
 class PastedTextProcessWorker(QObject):
-    finished = pyqtSignal(str, int)
-    error = pyqtSignal(str)
+    finished = pyqtSignal(str, int, int)
+    error = pyqtSignal(str, int)
 
-    def __init__(self, window: 'MainWindow', doc_key: str, text: str):
+    def __init__(self, window: 'MainWindow', doc_key: str, text: str, session_id: int):
         super().__init__()
         self.window = window
         self.doc_key = doc_key
         self.text = text
+        self.session_id = session_id
 
     @pyqtSlot()
     def run(self):
@@ -2761,7 +2902,7 @@ class PastedTextProcessWorker(QObject):
         try:
             clean_text = (self.text or "").strip()
             if not clean_text:
-                self.error.emit("Pasted text is empty.")
+                self.error.emit("Pasted text is empty.", self.session_id)
                 return
             # Use a descriptive source label for metadata
             source_label = f"pasted:{self.doc_key}"
@@ -2771,10 +2912,10 @@ class PastedTextProcessWorker(QObject):
                 clean_text,
             )
             print(f"PastedTextProcessWorker completed, chunks: {chunk_count}")
-            self.finished.emit(self.doc_key, chunk_count)
+            self.finished.emit(self.doc_key, chunk_count, self.session_id)
         except Exception as e:
             print(f"Exception in PastedTextProcessWorker: {e}")
-            self.error.emit(f"Processing failed: {str(e)}")
+            self.error.emit(f"Processing failed: {str(e)}", self.session_id)
 
 
 class _RefreshWorker(QObject):
