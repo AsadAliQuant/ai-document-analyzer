@@ -35,3 +35,7 @@ Thumbs.db
 
 # Local PHP API secrets
 server-php-auth/config.php
+
+# Local phase backups
+phase 4/
+ai-document-analyzer_AfterPhase2Delivered.zip
