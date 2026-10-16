@@ -30,7 +30,7 @@ echo.
 
 REM Verify critical imports before building
 echo [1/2] Verifying RAG imports...
-"%PYEXE%" -c "from qdrant_client import QdrantClient; from langchain_qdrant import QdrantVectorStore; from sentence_transformers import SentenceTransformer; print('[OK] All RAG imports working')"
+"%PYEXE%" -c "from qdrant_client import QdrantClient; from google import genai; print('[OK] All RAG imports working')"
 if %ERRORLEVEL% NEQ 0 (
     echo [ERROR] RAG imports failed!
     echo         Run: %PYEXE% -m pip install -r requirements.txt
@@ -49,11 +49,6 @@ echo.
     --add-data "assets;assets" ^
     --add-data "styles.qss;." ^
     --add-data "config.json;." ^
-    --add-data "models;models" ^
-    --collect-all sentence_transformers ^
-    --collect-all transformers ^
-    --collect-all langchain_qdrant ^
-    --collect-all langchain_huggingface ^
     --collect-all langchain_text_splitters ^
     --collect-all langchain_core ^
     --collect-all qdrant_client ^
@@ -62,9 +57,8 @@ echo.
     --collect-all sklearn ^
     --collect-all easyocr ^
     --collect-all google.generativeai ^
-    --hidden-import sentence_transformers ^
-    --hidden-import langchain_qdrant ^
-    --hidden-import langchain_huggingface ^
+    --collect-all google.genai ^
+    --hidden-import google.genai ^
     --hidden-import qdrant_client.local ^
     --hidden-import portalocker ^
     --collect-all keyring ^

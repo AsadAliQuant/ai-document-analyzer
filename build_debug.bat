@@ -33,14 +33,12 @@ echo.
 echo [2/4] Cleaning previous build artifacts...
 if exist "%DIST_DIR%\%APP_NAME%.exe" del /F /Q "%DIST_DIR%\%APP_NAME%.exe"
 
-REM Prefetch models
+REM Prefetch EasyOCR weights
 echo.
-echo [3/4] Checking offline models...
+echo [3/4] Checking offline OCR models...
 if exist "offline_bootstrap.py" (
-    if not exist "models\sentence-transformers\all-MiniLM-L6-v2\config.json" (
-        echo Prefetching models...
-        "%PYEXE%" offline_bootstrap.py --prefetch --target models
-    )
+    echo Prefetching missing OCR models...
+    "%PYEXE%" offline_bootstrap.py --prefetch --target models
 )
 
 REM Build with console enabled for debugging
@@ -67,8 +65,7 @@ echo.
     --hidden-import=easyocr.easyocr ^
     --hidden-import=easyocr.recognition ^
     --hidden-import=easyocr.detection ^
-    --hidden-import=sentence_transformers ^
-    --hidden-import=transformers ^
+    --hidden-import=google.genai ^
     --hidden-import=skimage ^
     --hidden-import=skimage.transform ^
     --hidden-import=imageio ^
@@ -77,7 +74,7 @@ echo.
     --collect-all=easyocr ^
     --collect-all=langchain_text_splitters ^
     --collect-all=langchain_core ^
-    --collect-all=sentence_transformers ^
+    --collect-all=google.genai ^
     --collect-all=skimage ^
     --collect-all=imageio ^
     --additional-hooks-dir=hooks ^

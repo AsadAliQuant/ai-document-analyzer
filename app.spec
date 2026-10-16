@@ -6,7 +6,7 @@ Bundles all dependencies into a single EXE for Windows 10/11
 
 import sys
 import os
-from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 block_cipher = None
 
@@ -20,14 +20,7 @@ packages_to_collect = [
     'PyQt6',
     'langchain',
     'langchain_core',
-    'langchain_community',
     'langchain_text_splitters',
-    'langchain_huggingface',
-    'sentence_transformers',
-    'transformers',
-    'huggingface_hub',
-    'tokenizers',
-    'safetensors',
     'torch',
     'torchvision',
     'numpy',
@@ -46,6 +39,7 @@ packages_to_collect = [
     'ollama',
     'google',
     'google.generativeai',
+    'google.genai',
     'google.ai',
     'keyring',
     'jaraco',
@@ -71,9 +65,6 @@ for pkg in packages_to_collect:
 
 # Additional submodules that might be missed
 extra_submodules = [
-    'langchain_community.vectorstores',
-    'langchain_community.embeddings',
-    'langchain_huggingface.embeddings',
     'qdrant_client.models',
     'qdrant_client.http',
     'qdrant_client.http.models',
@@ -122,14 +113,8 @@ explicit_hiddenimports = [
     'langchain_core.documents',
     'langchain_core.documents.base',
     'langchain_core.pydantic_v1',
-    'sentence_transformers',
-    'sentence_transformers.models',
-    'sentence_transformers.util',
-    'transformers',
-    'transformers.models',
-    'transformers.tokenization_utils_base',
-    'huggingface_hub',
-    'huggingface_hub.hf_api',
+    'google.genai',
+    'google.genai.types',
     'torch',
     'torch.nn',
     'torch.nn.functional',
@@ -224,9 +209,10 @@ if os.path.isfile('config.json'):
 if os.path.isfile('prompts.txt'):
     app_datas.append(('prompts.txt', '.'))
 
-# Add models directory if it exists and has content
-if os.path.isdir('models') and os.listdir('models'):
-    app_datas.append(('models', 'models'))
+# Bundle only EasyOCR weights; embedding vectors are generated through Gemini.
+easyocr_models_dir = os.path.join('models', 'easyocr')
+if os.path.isdir(easyocr_models_dir) and os.listdir(easyocr_models_dir):
+    app_datas.append((easyocr_models_dir, os.path.join('models', 'easyocr')))
 
 datas += app_datas
 

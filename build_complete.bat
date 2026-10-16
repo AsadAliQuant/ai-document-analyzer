@@ -62,21 +62,15 @@ if exist "%DIST_DIR%" rmdir /S /Q "%DIST_DIR%"
 if exist "%BUILD_DIR%" rmdir /S /Q "%BUILD_DIR%"
 
 REM ------------------------------------------------------------
-REM Prefetch offline models into ./models if missing
+REM Prefetch EasyOCR weights into ./models if available
 REM ------------------------------------------------------------
 echo.
-echo [3/4] Checking offline models...
-set MODELS_OK=0
-if exist "models\sentence-transformers\all-MiniLM-L6-v2\config.json" set MODELS_OK=1
-if %MODELS_OK%==0 (
-    if exist "offline_bootstrap.py" (
-        echo Prefetching offline models into .\models ...
-        "%PYEXE%" offline_bootstrap.py --prefetch --target models
-    ) else (
-        echo Note: offline_bootstrap.py not found, skipping model prefetch.
-    )
+echo [3/4] Checking offline OCR models...
+if exist "offline_bootstrap.py" (
+    echo Prefetching missing EasyOCR weights into .\models ...
+    "%PYEXE%" offline_bootstrap.py --prefetch --target models
 ) else (
-    echo Offline models already present.
+    echo Note: offline_bootstrap.py not found, skipping OCR model prefetch.
 )
 
 REM ------------------------------------------------------------

@@ -1,35 +1,39 @@
 # -*- mode: python ; coding: utf-8 -*-
+import os
 from PyInstaller.utils.hooks import collect_all
 
-datas = [('assets', 'assets'), ('styles.qss', '.'), ('config.json', '.'), ('models', 'models')]
+
+datas = [('assets', 'assets'), ('styles.qss', '.'), ('config.json', '.')]
+easyocr_models_dir = os.path.join('models', 'easyocr')
+if os.path.isdir(easyocr_models_dir) and os.listdir(easyocr_models_dir):
+    datas.append((easyocr_models_dir, os.path.join('models', 'easyocr')))
+
 binaries = []
-hiddenimports = ['sentence_transformers', 'langchain_qdrant', 'langchain_huggingface', 'qdrant_client.local', 'portalocker', 'keyring', 'keyring.backends']
-tmp_ret = collect_all('sentence_transformers')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('transformers')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('langchain_qdrant')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('langchain_huggingface')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('langchain_text_splitters')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('langchain_core')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('qdrant_client')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('torch')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('scipy')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('sklearn')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('easyocr')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('google.generativeai')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
-tmp_ret = collect_all('keyring')
-datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+hiddenimports = [
+    'google.genai',
+    'google.genai.types',
+    'qdrant_client.local',
+    'portalocker',
+    'keyring',
+    'keyring.backends',
+]
+
+for package in (
+    'langchain_text_splitters',
+    'langchain_core',
+    'qdrant_client',
+    'torch',
+    'scipy',
+    'sklearn',
+    'easyocr',
+    'google.generativeai',
+    'google.genai',
+    'keyring',
+):
+    tmp_ret = collect_all(package)
+    datas += tmp_ret[0]
+    binaries += tmp_ret[1]
+    hiddenimports += tmp_ret[2]
 
 
 a = Analysis(

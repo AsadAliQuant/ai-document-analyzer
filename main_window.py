@@ -786,6 +786,13 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         if (file_path or input_text) and doc_key:
             has_store = bool(self.large_doc_manager.has_vector_store(doc_key))
             if not has_store:
+                if not self._get_gemini_key():
+                    QMessageBox.warning(
+                        self,
+                        "Gemini Embedding",
+                        "A Gemini API key is required to index documents. Add it in Settings and try again.",
+                    )
+                    return
                 self._current_doc_key = doc_key
                 self._pending_analysis_params = params
                 if file_path:
@@ -1269,7 +1276,9 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
 
         # Determine provider and API key (classification will run in the worker thread)
         provider_type = "ollama" if provider.startswith("Offline") else ("gemini" if "Gemini" in provider else "")
-        gemini_key = self._get_gemini_key() if "Gemini" in provider else ""
+        # Gemini Embedding powers RAG for both online and offline chat models.
+        needs_gemini_key = bool(self._qa_vector_doc_key) or "Gemini" in provider
+        gemini_key = self._get_gemini_key() if needs_gemini_key else ""
 
         # Continue with normal RAG processing for non-counting questions
         params = {
@@ -2359,8 +2368,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         if doc_key:
             try:
                 docs = self.large_doc_manager.retrieve_context(doc_key, user_question or "")
-            except Exception:
-                docs = []
+            except Exception as exc:
+                raise RuntimeError(str(exc)) from exc
             if docs:
                 collected: List[str] = []
                 for doc in docs:
@@ -2443,8 +2452,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         if doc_key:
             try:
                 docs = self.large_doc_manager.retrieve_context(doc_key, user_question or "")
-            except Exception:
-                docs = []
+            except Exception as exc:
+                raise RuntimeError(str(exc)) from exc
             if docs:
                 collected: List[str] = []
                 for doc in docs:
@@ -2820,6 +2829,13 @@ class _QAWorker(QObject):
             except Exception:
                 # On any classification error, proceed with normal flow
                 pass
+
+            if doc_key and not (gemini_key or "").strip():
+                self.error.emit(
+                    "A Gemini API key is required for document semantic search. Add it in Settings and try again.",
+                    self.session_id,
+                )
+                return
 
             if provider == "ollama":
                 answer = self.window.answer_question_offline(model, messages, summary, input_text, doc_key)

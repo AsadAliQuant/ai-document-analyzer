@@ -6,7 +6,7 @@ Creates a folder with all dependencies (more reliable than single EXE)
 
 import sys
 import os
-from PyInstaller.utils.hooks import collect_all, collect_submodules, collect_data_files
+from PyInstaller.utils.hooks import collect_all, collect_submodules
 
 block_cipher = None
 
@@ -20,14 +20,7 @@ packages_to_collect = [
     'PyQt6',
     'langchain',
     'langchain_core',
-    'langchain_community',
     'langchain_text_splitters',
-    'langchain_huggingface',
-    'sentence_transformers',
-    'transformers',
-    'huggingface_hub',
-    'tokenizers',
-    'safetensors',
     'torch',
     'torchvision',
     'numpy',
@@ -48,6 +41,7 @@ packages_to_collect = [
     'ollama',
     'google',
     'google.generativeai',
+    'google.genai',
     'google.ai',
     'keyring',
     'jaraco',
@@ -66,9 +60,6 @@ for pkg in packages_to_collect:
 
 # Additional submodules
 extra_submodules = [
-    'langchain_community.vectorstores',
-    'langchain_community.embeddings',
-    'langchain_huggingface.embeddings',
     'qdrant_client.models',
     'qdrant_client.http',
     'scipy.stats',
@@ -89,6 +80,8 @@ for submod in extra_submodules:
 explicit_hiddenimports = [
     'langchain_text_splitters',
     'langchain_text_splitters.character',
+    'google.genai',
+    'google.genai.types',
     'easyocr',
     'easyocr.easyocr',
     'cv2',
@@ -126,8 +119,9 @@ if os.path.isfile('config.json'):
     app_datas.append(('config.json', '.'))
 if os.path.isfile('prompts.txt'):
     app_datas.append(('prompts.txt', '.'))
-if os.path.isdir('models') and os.listdir('models'):
-    app_datas.append(('models', 'models'))
+easyocr_models_dir = os.path.join('models', 'easyocr')
+if os.path.isdir(easyocr_models_dir) and os.listdir(easyocr_models_dir):
+    app_datas.append((easyocr_models_dir, os.path.join('models', 'easyocr')))
 
 datas += app_datas
 

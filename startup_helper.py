@@ -27,11 +27,14 @@ class InitializationWorker(QObject):
             # Step 2: Initialize document manager (heavy - loads Qdrant)
             self.progress.emit("Loading document manager")
             from large_doc_manager import LargeDocumentManager
-            self.window.large_doc_manager = LargeDocumentManager(self.window.app_config_dir)
-            
-            # Step 2.1: Prepare offline assets (HF embeddings cache, EasyOCR weights)
+            self.window.large_doc_manager = LargeDocumentManager(
+                self.window.app_config_dir,
+                api_key_provider=self.window._get_gemini_key,
+            )
+
+            # Step 2.1: Prepare offline OCR assets
             try:
-                self.progress.emit("Preparing offline models")
+                self.progress.emit("Preparing OCR models")
                 from offline_bootstrap import prepare_offline_assets
 
                 def _progress_callback(percent: float, message: str) -> None:
@@ -44,7 +47,7 @@ class InitializationWorker(QObject):
                 )
                 self.offline_state_ready.emit(state)
             except Exception as e:
-                # Non-fatal; app can still operate, but OCR/embeddings may download later if online
+                # Non-fatal; app can still operate, but OCR weights may download later if online
                 print(f"Offline bootstrap warning: {e}")
 
             # Step 3: Initialize state variables

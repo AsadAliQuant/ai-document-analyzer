@@ -22,11 +22,6 @@ def _app_bundle_dir() -> str:
 
 
 essential_model_subdirs = [
-    # HuggingFace Sentence Transformers
-    os.path.join("sentence-transformers", "all-MiniLM-L6-v2"),
-    os.path.join("sentence_transformers", "all-MiniLM-L6-v2"),
-    os.path.join("models--sentence-transformers--all-MiniLM-L6-v2"),
-    os.path.join("sentence-transformers_all-MiniLM-L6-v2"),
     # EasyOCR model folder (we assume a subfolder named 'easyocr' contains all weights)
     os.path.join("easyocr"),
 ]
@@ -78,61 +73,6 @@ def _internet_available(timeout: float = 1.5) -> bool:
             return True
     except OSError:
         return False
-
-
-def _has_sentence_transformer_cache(target_models_dir: str) -> bool:
-    def _contains_model_files(path: str) -> bool:
-        try:
-            for root, _dirs, files in os.walk(path):
-                for name in files:
-                    lowered = name.lower()
-                    if lowered.endswith((".bin", ".safetensors", ".pt")):
-                        return True
-                    if lowered in {"config.json", "tokenizer.json", "modules.json"}:
-                        return True
-        except Exception:
-            return False
-        return False
-
-    candidates = [
-        os.path.join(target_models_dir, "sentence-transformers", "all-MiniLM-L6-v2"),
-        os.path.join(target_models_dir, "sentence_transformers", "all-MiniLM-L6-v2"),
-        os.path.join(target_models_dir, "sentence-transformers_all-MiniLM-L6-v2"),
-        os.path.join(target_models_dir, "all-MiniLM-L6-v2"),
-    ]
-
-    for path in candidates:
-        if os.path.isdir(path) and _contains_model_files(path):
-            return True
-
-    # HuggingFace Hub style cache directories (models--<org>--<model>)
-    try:
-        for entry in os.listdir(target_models_dir):
-            if "all-MiniLM-L6-v2" not in entry:
-                continue
-            path = os.path.join(target_models_dir, entry)
-            if os.path.isdir(path) and _contains_model_files(path):
-                return True
-    except Exception:
-        pass
-
-    return False
-
-
-def _ensure_sentence_transformer_cached(target_models_dir: str) -> bool:
-    try:
-        from sentence_transformers import SentenceTransformer  # type: ignore
-        SentenceTransformer(
-            "sentence-transformers/all-MiniLM-L6-v2",
-            cache_folder=target_models_dir,
-        )
-        return _has_sentence_transformer_cache(target_models_dir)
-    except Exception as exc:
-        print(f"[offline_bootstrap] SentenceTransformer preload failed: {exc}")
-        import traceback
-        traceback.print_exc()
-        # Best-effort; skip if offline or any error
-        return _has_sentence_transformer_cache(target_models_dir)
 
 
 def _has_easyocr_cache(target_models_dir: str) -> bool:
@@ -204,12 +144,6 @@ def _save_state(path: Optional[str], state: Dict[str, object]) -> None:
 def _build_tasks() -> tuple[OfflineAssetTask, ...]:
     return (
         OfflineAssetTask(
-            name="embeddings",
-            title="Embedding model",
-            check=_has_sentence_transformer_cache,
-            prepare=_ensure_sentence_transformer_cached,
-        ),
-        OfflineAssetTask(
             name="easyocr",
             title="EasyOCR weights",
             check=_has_easyocr_cache,
@@ -223,13 +157,13 @@ def prepare_offline_assets(
     state_path: Optional[str] = None,
     progress_callback: Optional[Callable[[float, str], None]] = None,
 ) -> Dict[str, object]:
-    """Prepare local caches for embeddings and OCR.
+    """Prepare the local EasyOCR cache.
 
     Strategy:
-    1) If a bundled 'models/' folder exists next to the app, copy its contents
-       into the appdata models dir.
-    2) If internet is available, prefetch the SentenceTransformer and EasyOCR weights
-       into the appdata models dir (best-effort, on background thread).
+    1) If a bundled ``models/easyocr`` folder exists next to the app, copy it
+       into the appdata models directory.
+    2) If runtime prefetch is enabled and internet is available, download the
+       EasyOCR weights into the appdata models directory.
     """
     state = _load_state(state_path)
     tasks = _build_tasks()
@@ -363,7 +297,6 @@ def _prefetch_into_repo_models(target_dir: str) -> None:
         _copy_tree(src_models, target_dir)
     # Step 2: fetch models if online
     if _internet_available():
-        _ensure_sentence_transformer_cached(target_dir)
         _ensure_easyocr_models_cached(target_dir)
 
 

@@ -1,8 +1,9 @@
 import hashlib
 import json
 import os
+import threading
 import time
-from typing import List, Optional, Any
+from typing import List, Optional
 
 try:
     from qdrant_client import QdrantClient  # type: ignore
@@ -20,8 +21,134 @@ except ImportError:
     from langchain.schema import Document
 
 
+class GeminiEmbeddingClient:
+    """Generate retrieval embeddings with Gemini Embedding 2."""
+
+    MODEL = "gemini-embedding-2"
+    DIMENSION = 768
+    MAX_REQUEST_TOKENS = 24000
+    MAX_BATCH_ITEMS = 32
+
+    def __init__(self, api_key: str) -> None:
+        key = (api_key or "").strip()
+        if not key:
+            raise RuntimeError(
+                "A Gemini API key is required for document indexing and semantic search. "
+                "Add it in Settings and try again."
+            )
+        try:
+            from google import genai  # type: ignore
+            from google.genai import types  # type: ignore
+        except Exception as exc:
+            raise RuntimeError(
+                "The Google Gen AI SDK is not available. Install 'google-genai'."
+            ) from exc
+
+        self._client = genai.Client(api_key=key)
+        self._types = types
+
+    def embed_documents(self, texts: List[str], title: str = "none") -> List[List[float]]:
+        clean_title = (title or "none").strip() or "none"
+        prompts = [
+            f"title: {clean_title} | text: {(text or '').strip()}"
+            for text in texts
+            if (text or "").strip()
+        ]
+        if not prompts:
+            return []
+
+        vectors: List[List[float]] = []
+        for batch in self._build_batches(prompts):
+            vectors.extend(self._embed_separate(batch))
+        return vectors
+
+    def embed_query(self, query: str) -> List[float]:
+        clean_query = (query or "").strip()
+        if not clean_query:
+            raise ValueError("The search question cannot be empty.")
+        prompt = f"task: question answering | query: {clean_query}"
+        return self._embed_separate([prompt])[0]
+
+    def _build_batches(self, prompts: List[str]) -> List[List[str]]:
+        batches: List[List[str]] = []
+        current: List[str] = []
+        estimated_tokens = 0
+
+        for prompt in prompts:
+            # Character-based estimation avoids an extra tokenizer dependency.
+            prompt_tokens = max(1, (len(prompt) + 2) // 3)
+            if prompt_tokens > self.MAX_REQUEST_TOKENS:
+                raise RuntimeError(
+                    "A document chunk is too large for Gemini Embedding. Reduce the configured chunk size."
+                )
+            if current and (
+                len(current) >= self.MAX_BATCH_ITEMS
+                or estimated_tokens + prompt_tokens > self.MAX_REQUEST_TOKENS
+            ):
+                batches.append(current)
+                current = []
+                estimated_tokens = 0
+            current.append(prompt)
+            estimated_tokens += prompt_tokens
+
+        if current:
+            batches.append(current)
+        return batches
+
+    def _embed_separate(self, prompts: List[str]) -> List[List[float]]:
+        contents = [
+            self._types.Content(
+                role="user",
+                parts=[self._types.Part.from_text(text=prompt)],
+            )
+            for prompt in prompts
+        ]
+        try:
+            result = self._client.models.embed_content(
+                model=self.MODEL,
+                contents=contents,
+                config=self._types.EmbedContentConfig(
+                    output_dimensionality=self.DIMENSION,
+                ),
+            )
+        except Exception as exc:
+            raise self._friendly_error(exc) from exc
+
+        embeddings = getattr(result, "embeddings", None) or []
+        vectors = [list(getattr(item, "values", None) or []) for item in embeddings]
+        if len(vectors) != len(prompts) or any(len(vector) != self.DIMENSION for vector in vectors):
+            raise RuntimeError("Gemini returned an invalid embedding response. Please try again.")
+        return vectors
+
+    @staticmethod
+    def _friendly_error(exc: Exception) -> RuntimeError:
+        message = str(exc)
+        lowered = message.lower()
+        status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+        if status_code == 429 or "429" in lowered or "resource_exhausted" in lowered:
+            return RuntimeError(
+                "Gemini Embedding free-tier limit was reached. Wait for the quota to reset and try again."
+            )
+        if status_code in {401, 403} or any(
+            term in lowered
+            for term in ("api key", "permission_denied", "permission denied", "unauthenticated")
+        ):
+            return RuntimeError(
+                "Gemini rejected the API key. Check the Gemini API key in Settings."
+            )
+        if any(term in lowered for term in ("connection", "network", "dns", "timed out", "timeout")):
+            return RuntimeError(
+                "Gemini Embedding could not connect to the internet. Check the connection and try again."
+            )
+        return RuntimeError(f"Gemini Embedding request failed: {message}")
+
+
 class LargeDocumentManager:
     """Manage chunking and vector store persistence for large documents."""
+
+    EMBEDDING_MODEL = GeminiEmbeddingClient.MODEL
+    EMBEDDING_DIMENSION = GeminiEmbeddingClient.DIMENSION
+    EMBEDDING_FORMAT_VERSION = 1
 
     def _fallback_split_text(self, text: str, chunk_size: int, chunk_overlap: int) -> List[str]:
         # Minimal dependency-free chunking fallback for packaged builds
@@ -58,13 +185,15 @@ class LargeDocumentManager:
             start += step
         return chunks
 
-    def __init__(self, base_dir: str) -> None:
+    def __init__(self, base_dir: str, api_key_provider=None) -> None:
         self.base_dir = base_dir
         self.vector_base_dir = os.path.join(self.base_dir, "vector_store")
         os.makedirs(self.vector_base_dir, exist_ok=True)
-        # Local cache directory for ML models (embeddings, OCR, etc.)
+        # Local model storage remains for EasyOCR only.
         self.models_dir = os.path.join(self.base_dir, "models")
         os.makedirs(self.models_dir, exist_ok=True)
+        self._api_key_provider = api_key_provider
+        self._embedding_local = threading.local()
         if not _qdrant_available:
             raise RuntimeError(
                 "Qdrant is not available. Install 'qdrant-client' to enable vector storage."
@@ -106,6 +235,15 @@ class LargeDocumentManager:
         store_dir = self.doc_store_path(doc_key)
         if not os.path.isdir(store_dir):
             return False
+
+        metadata = self._read_metadata(doc_key)
+        if (
+            metadata.get("embedding_model") != self.EMBEDDING_MODEL
+            or metadata.get("embedding_dimension") != self.EMBEDDING_DIMENSION
+            or metadata.get("embedding_format_version") != self.EMBEDDING_FORMAT_VERSION
+        ):
+            return False
+
         # Check for Qdrant artifacts
         qdrant_dir = os.path.join(store_dir, "qdrant_db")
         if os.path.isdir(qdrant_dir):
@@ -139,13 +277,7 @@ class LargeDocumentManager:
         if not clean_text:
             raise ValueError("Document contains no extractable text.")
 
-        # Prepare directory
         store_dir = self.doc_store_path(doc_key)
-        self._reset_directory(store_dir)
-        os.makedirs(store_dir, exist_ok=True)
-
-        # Persist raw extracted text for debugging/inspection
-        self._write_raw_text(store_dir, clean_text)
 
         # Import text splitter lazily to avoid importing heavy deps at startup
         splitter = None
@@ -188,27 +320,24 @@ class LargeDocumentManager:
         if not documents:
             raise ValueError("Failed to create document chunks for vector store.")
 
-        print("Creating embeddings")
+        print("Creating Gemini embeddings")
         embeddings = self._embedding()
-        print("Embeddings created successfully")
 
-        # Create Qdrant vector store
+        # Generate vectors before replacing an existing store. If Gemini is
+        # unavailable, the last valid index remains usable.
+        texts = [doc.page_content for doc in documents]
+        metadatas = [doc.metadata for doc in documents]
+        document_title = os.path.basename(file_path) if file_path else "none"
+        vectors = embeddings.embed_documents(texts, title=document_title)
+        if len(vectors) != len(texts):
+            raise RuntimeError("Gemini did not return an embedding for every document chunk.")
+
+        # Replace the local Qdrant store only after embedding succeeds.
+        self._reset_directory(store_dir)
+        os.makedirs(store_dir, exist_ok=True)
+        self._write_raw_text(store_dir, clean_text)
         qdrant_dir = os.path.join(store_dir, "qdrant_db")
-        
-        # Aggressive cleanup with retries
-        if os.path.exists(qdrant_dir):
-            import shutil
-            for attempt in range(3):
-                try:
-                    shutil.rmtree(qdrant_dir)
-                    break
-                except Exception as cleanup_err:
-                    if attempt < 2:
-                        print(f"Cleanup attempt {attempt + 1} failed, retrying...")
-                        time.sleep(0.5)
-                    else:
-                        print(f"Warning: Could not remove old qdrant_dir: {cleanup_err}")
-        
+
         client = None
         try:
             print("Creating Qdrant vector store")
@@ -216,26 +345,17 @@ class LargeDocumentManager:
             client = QdrantClient(path=qdrant_dir)
             collection_name = f"doc_{doc_key}"
             
-            # Get embedding dimension from first document
-            sample_embedding = embeddings.embed_query(documents[0].page_content[:100])
-            embedding_dim = len(sample_embedding)
-            
             # Create or recreate collection
             try:
                 client.delete_collection(collection_name)
             except Exception:
                 pass
-            
+
             client.create_collection(
                 collection_name=collection_name,
-                vectors_config=VectorParams(size=embedding_dim, distance=Distance.COSINE),
+                vectors_config=VectorParams(size=self.EMBEDDING_DIMENSION, distance=Distance.COSINE),
             )
-            
-            # Add documents with embeddings
-            texts = [doc.page_content for doc in documents]
-            metadatas = [doc.metadata for doc in documents]
-            vectors = embeddings.embed_documents(texts)
-            
+
             # Upload points
             from qdrant_client.models import PointStruct
             points = [
@@ -251,8 +371,11 @@ class LargeDocumentManager:
             used_backend = "qdrant"
             print("Qdrant vector store created successfully")
         except Exception as e:
+            message = str(e)
+            if "Gemini" in message or "API key" in message or "Google Gen AI SDK" in message:
+                raise RuntimeError(message) from e
             raise RuntimeError(
-                f"Failed to create Qdrant vector store: {e}"
+                f"Failed to create Qdrant vector store: {message}"
             ) from e
         finally:
             # Close the client to release locks
@@ -305,6 +428,8 @@ class LargeDocumentManager:
         return "\n\n".join(collected)
 
     def retrieve_context(self, doc_key: str, query: str, k: int = 25) -> List[Document]:
+        if not self.has_vector_store(doc_key):
+            return []
         store_dir = self.doc_store_path(doc_key)
         qdrant_dir = os.path.join(store_dir, "qdrant_db")
         
@@ -321,15 +446,16 @@ class LargeDocumentManager:
             query_vector = embeddings.embed_query(query)
             
             # Search using QdrantClient directly
-            search_results = qdrant_client.search(
+            query_response = qdrant_client.query_points(
                 collection_name=collection_name,
-                query_vector=query_vector,
+                query=query_vector,
                 limit=max(1, int(k)),
+                with_payload=True,
             )
-            
+
             # Convert results to Document objects
             results = []
-            for hit in search_results:
+            for hit in query_response.points:
                 payload = hit.payload or {}
                 page_content = payload.get("page_content", "")
                 metadata = payload.get("metadata", {})
@@ -337,8 +463,7 @@ class LargeDocumentManager:
             
             return results
         except Exception as e:
-            print(f"Error retrieving context from Qdrant: {e}")
-            return []
+            raise RuntimeError(f"Failed to retrieve document context: {e}") from e
         finally:
             if qdrant_client is not None and hasattr(qdrant_client, "close"):
                 try:
@@ -376,30 +501,26 @@ class LargeDocumentManager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _embedding(self) -> Any:
-        print("Initializing HuggingFaceEmbeddings with all-MiniLM-L6-v2")
-        model_kwargs = {}
-        try:
-            import torch  # type: ignore
+    def _embedding(self) -> GeminiEmbeddingClient:
+        api_key = ""
+        if callable(self._api_key_provider):
             try:
-                if torch.cuda.is_available():
-                    model_kwargs = {"device": "cuda"}
+                api_key = str(self._api_key_provider() or "").strip()
             except Exception:
-                pass
-        except Exception:
-            pass
-        # Force cache to app-specific models dir so we can bundle/copy for offline use
-        # Import HuggingFaceEmbeddings lazily to avoid importing transformers/torch at startup
-        try:
-            from langchain_huggingface import HuggingFaceEmbeddings  # type: ignore
-        except Exception as e:
-            raise RuntimeError("langchain-huggingface not available. Please install 'langchain-huggingface'.") from e
+                api_key = ""
+        if not api_key:
+            raise RuntimeError(
+                "A Gemini API key is required for document indexing and semantic search. "
+                "Add it in Settings and try again."
+            )
 
-        return HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            cache_folder=self.models_dir,
-            model_kwargs=model_kwargs,
-        )
+        client = getattr(self._embedding_local, "client", None)
+        client_key = getattr(self._embedding_local, "api_key", "")
+        if client is None or client_key != api_key:
+            client = GeminiEmbeddingClient(api_key)
+            self._embedding_local.client = client
+            self._embedding_local.api_key = api_key
+        return client
 
 
     def _write_backend_marker(self, store_dir: str, backend: str) -> None:
@@ -462,10 +583,26 @@ class LargeDocumentManager:
             "chunk_count": chunk_count,
             "chunk_size": chunk_size,
             "chunk_overlap": chunk_overlap,
+            "embedding_model": self.EMBEDDING_MODEL,
+            "embedding_dimension": self.EMBEDDING_DIMENSION,
+            "embedding_format_version": self.EMBEDDING_FORMAT_VERSION,
             "created_at": int(time.time()),
         }
         with open(os.path.join(store_dir, "metadata.json"), "w", encoding="utf-8") as f:
             json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+    def _read_metadata(self, doc_key: str) -> dict:
+        path = self.metadata_path(doc_key)
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, dict):
+                return data
+        except Exception:
+            pass
+        return {}
 
     def _read_chunks(self, doc_key: str) -> List[dict]:
         path = self.chunks_path(doc_key)
