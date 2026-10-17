@@ -15,10 +15,7 @@ except Exception:
     VectorParams = None  # type: ignore
     _qdrant_available = False
 
-try:
-    from langchain_core.documents import Document
-except ImportError:
-    from langchain.schema import Document
+from langchain_core.documents import Document
 
 
 class GeminiEmbeddingClient:
@@ -46,6 +43,12 @@ class GeminiEmbeddingClient:
 
         self._client = genai.Client(api_key=key)
         self._types = types
+
+    def close(self) -> None:
+        try:
+            self._client.close()
+        except Exception:
+            pass
 
     def embed_documents(self, texts: List[str], title: str = "none") -> List[List[float]]:
         clean_title = (title or "none").strip() or "none"
@@ -185,14 +188,10 @@ class LargeDocumentManager:
             start += step
         return chunks
 
-    def __init__(self, base_dir: str, api_key_provider=None) -> None:
+    def __init__(self, base_dir: str) -> None:
         self.base_dir = base_dir
         self.vector_base_dir = os.path.join(self.base_dir, "vector_store")
         os.makedirs(self.vector_base_dir, exist_ok=True)
-        # Local model storage remains for EasyOCR only.
-        self.models_dir = os.path.join(self.base_dir, "models")
-        os.makedirs(self.models_dir, exist_ok=True)
-        self._api_key_provider = api_key_provider
         self._embedding_local = threading.local()
         if not _qdrant_available:
             raise RuntimeError(
@@ -202,14 +201,16 @@ class LargeDocumentManager:
     # ------------------------------------------------------------------
     # Metadata helpers
     # ------------------------------------------------------------------
-    def compute_document_key(self, file_path: str) -> str:
-        """Return a stable key representing the file path, size, and mtime."""
+    def compute_document_key(self, file_path: str, processing_version: Optional[str] = None) -> str:
+        """Return a stable key for the file and optional processing pipeline."""
         abs_path = os.path.abspath(file_path)
         try:
             stat = os.stat(abs_path)
             payload = f"{abs_path}::{stat.st_size}::{int(stat.st_mtime)}"
         except OSError:
             payload = abs_path
+        if processing_version:
+            payload = f"{payload}::processing_version={processing_version}"
         try:
             return hashlib.md5(payload.encode("utf-8"), usedforsecurity=False).hexdigest()
         except TypeError:
@@ -269,11 +270,10 @@ class LargeDocumentManager:
         text: str,
         chunk_size: int = 1200,
         chunk_overlap: int = 200,
+        api_key: Optional[str] = None,
     ) -> int:
         """Split text, embed, and persist to Qdrant. Returns chunk count."""
-        print(f"prepare_document called for doc_key: {doc_key}, file: {file_path}")
         clean_text = (text or "").strip()
-        print(f"Clean text length: {len(clean_text)}")
         if not clean_text:
             raise ValueError("Document contains no extractable text.")
 
@@ -288,16 +288,8 @@ class LargeDocumentManager:
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
             )
-        except Exception as e1:
-            splitter_import_error = e1
-            try:
-                from langchain.text_splitter import RecursiveCharacterTextSplitter  # type: ignore
-                splitter = RecursiveCharacterTextSplitter(
-                    chunk_size=chunk_size,
-                    chunk_overlap=chunk_overlap,
-                )
-            except Exception as e2:
-                splitter_import_error = e2
+        except Exception as exc:
+            splitter_import_error = exc
 
         if splitter is not None:
             raw_chunks = splitter.split_text(clean_text)
@@ -310,18 +302,15 @@ class LargeDocumentManager:
                     f"Text splitter unavailable and fallback chunker produced no chunks. "
                     f"Splitter import error: {splitter_import_error}"
                 ) from splitter_import_error
-        print(f"Created {len(raw_chunks)} raw chunks")
         documents: List[Document] = [
             Document(page_content=chunk, metadata={"source": file_path, "chunk_index": idx})
             for idx, chunk in enumerate(raw_chunks)
             if chunk.strip()
         ]
-        print(f"Created {len(documents)} documents after filtering")
         if not documents:
             raise ValueError("Failed to create document chunks for vector store.")
 
-        print("Creating Gemini embeddings")
-        embeddings = self._embedding()
+        embeddings = self._embedding(api_key)
 
         # Generate vectors before replacing an existing store. If Gemini is
         # unavailable, the last valid index remains usable.
@@ -340,7 +329,6 @@ class LargeDocumentManager:
 
         client = None
         try:
-            print("Creating Qdrant vector store")
             # Use QdrantClient directly to avoid langchain compatibility issues
             client = QdrantClient(path=qdrant_dir)
             collection_name = f"doc_{doc_key}"
@@ -369,7 +357,6 @@ class LargeDocumentManager:
             client.upsert(collection_name=collection_name, points=points)
             
             used_backend = "qdrant"
-            print("Qdrant vector store created successfully")
         except Exception as e:
             message = str(e)
             if "Gemini" in message or "API key" in message or "Google Gen AI SDK" in message:
@@ -397,7 +384,6 @@ class LargeDocumentManager:
             chunk_size=chunk_size,
             chunk_overlap=chunk_overlap,
         )
-        print(f"prepare_document completed, returning {len(documents)} chunks")
         return len(documents)
 
     def _write_raw_text(self, store_dir: str, content: str) -> None:
@@ -427,7 +413,13 @@ class LargeDocumentManager:
                 break
         return "\n\n".join(collected)
 
-    def retrieve_context(self, doc_key: str, query: str, k: int = 25) -> List[Document]:
+    def retrieve_context(
+        self,
+        doc_key: str,
+        query: str,
+        k: int = 25,
+        api_key: Optional[str] = None,
+    ) -> List[Document]:
         if not self.has_vector_store(doc_key):
             return []
         store_dir = self.doc_store_path(doc_key)
@@ -438,7 +430,7 @@ class LargeDocumentManager:
         
         qdrant_client = None
         try:
-            embeddings = self._embedding()
+            embeddings = self._embedding(api_key)
             qdrant_client = QdrantClient(path=qdrant_dir)
             collection_name = f"doc_{doc_key}"
             
@@ -501,13 +493,8 @@ class LargeDocumentManager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _embedding(self) -> GeminiEmbeddingClient:
-        api_key = ""
-        if callable(self._api_key_provider):
-            try:
-                api_key = str(self._api_key_provider() or "").strip()
-            except Exception:
-                api_key = ""
+    def _embedding(self, api_key: Optional[str] = None) -> GeminiEmbeddingClient:
+        api_key = (api_key or "").strip()
         if not api_key:
             raise RuntimeError(
                 "A Gemini API key is required for document indexing and semantic search. "
@@ -517,6 +504,8 @@ class LargeDocumentManager:
         client = getattr(self._embedding_local, "client", None)
         client_key = getattr(self._embedding_local, "api_key", "")
         if client is None or client_key != api_key:
+            if client is not None:
+                client.close()
             client = GeminiEmbeddingClient(api_key)
             self._embedding_local.client = client
             self._embedding_local.api_key = api_key

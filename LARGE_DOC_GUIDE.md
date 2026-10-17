@@ -1,174 +1,88 @@
-# Large Document & Image OCR Processing Guide
+# Document, Image OCR, and RAG Processing Guide
 
-## Overview
-The AI Document Analyzer supports processing large documents (PDFs, DOCX, TXT files with more than 2 pages) and **images with OCR** using advanced chunking and vector database technology. This enables efficient analysis and Q&A for documents and images that would otherwise be too large to process effectively.
+## Supported inputs
 
-## How It Works
+- PDF: text is extracted with PyPDF2. Scanned-PDF OCR is not supported.
+- DOCX: text is extracted with python-docx.
+- TXT: text is read directly.
+- PNG/JPG/JPEG: the full image is sent to Gemini 2.5 Flash-Lite for transcription, with Gemini 3.1 Flash-Lite and then Gemini 3.5 Flash-Lite as ordered fallbacks when the current model is unavailable.
+- Pasted text: text is indexed directly.
 
-### Automatic Detection
-- **Documents**: Automatically detected as "large" if they contain more than 2 pages (for PDFs) or equivalent content
-- **Images**: All uploaded images (PNG, JPG, JPEG) are processed with OCR
-- The system prompts users before proceeding with processing
+## Processing pipeline
 
-### Processing Pipeline
-1. **OCR Extraction (Images)**:
-   - Uses EasyOCR to extract text from images
-   - Supports English and Arabic languages
-   - GPU acceleration when CUDA is available (falls back to CPU)
-   - Extracted text is treated like document text
+```text
+Document text or Gemini image transcription
+    → 1200-character chunks with 200-character overlap
+    → Gemini Embedding 2
+    → embedded Qdrant store on the user's computer
+    → summary, semantic Q&A, and exact counting
+```
 
-2. **Chunking & Embedding**:
-   - Documents/OCR text split into manageable chunks (1200 characters each with 200 character overlap)
-   - Each chunk is embedded using sentence-transformers (all-MiniLM-L6-v2 model)
-   - Chunks are stored in an embedded Qdrant vector database (runs in-process, no server needed)
-   - GPU acceleration is used automatically when CUDA is available
+Image OCR is intentionally separate from summarization. Gemini first returns transcription only. That raw text is then saved, chunked, embedded, and passed to the selected Gemini or Ollama summary model.
 
-### RAG (Retrieval-Augmented Generation)
-- For Q&A, relevant chunks are retrieved based on semantic similarity to the user's question
-- The AI generates answers using the most relevant document passages
-- Supports both Ollama and Gemini models
+## Image OCR requirements and privacy
 
-## User Experience
+- A Gemini API key configured in Settings is required.
+- An internet connection is required.
+- The complete uploaded image is sent to Google Gemini for OCR.
+- Gemini API quota and billing rules may apply.
+- Selecting Ollama keeps final summary/Q&A generation local, but new image OCR and Gemini Embedding 2 indexing still use Google APIs.
+- OCR supports English, Arabic, and mixed-language images.
+- Images containing tables or multiple paragraphs preserve reading order and layout where reasonably possible.
 
-### First-Time Processing
+The OCR request treats text visible in an image as content to transcribe, not as instructions to follow. It does not ask Gemini to summarize, translate, explain, or infer missing text.
 
-**For Documents:**
-1. Upload a large document (PDF/DOCX/TXT with >2 pages)
-2. System detects large document and prompts for processing
-3. Click "Yes" to proceed with chunking
-4. Wait for chunking to complete
-5. Summary generation begins using chunked content
+## Caching
 
-**For Images:**
-1. Upload an image (PNG/JPG/JPEG)
-2. System prompts for OCR processing
-3. Click "Yes" to proceed with OCR extraction
-4. EasyOCR extracts text from image (GPU-accelerated if available)
-5. Extracted text is chunked and stored in vector database
-6. Summary generated from OCR text using selected AI model
-7. Q&A enabled for asking questions about image content
+Document indexes live under:
 
-### Subsequent Usage
-- Previously processed documents/images load instantly from vector store
-- No need to re-process the same file
-- Q&A uses vector retrieval for accurate responses
-- Images are treated exactly like text documents after OCR
+```text
+%APPDATA%/AI Document Analyzer/vector_store/
+```
 
-## Technical Details
+Each index stores:
 
-### Dependencies
-- **LangChain**: Text splitting and vector store management
-- **Qdrant**: Embedded vector database (runs in-process, no server required)
-- **Sentence Transformers**: all-MiniLM-L6-v2 for embeddings
-- **PyTorch**: Enables GPU acceleration when CUDA is available
-- **EasyOCR**: Local OCR engine for text extraction from images
-- **Pillow (PIL)**: Image processing library
+- Qdrant vectors
+- Ordered text chunks
+- The complete raw extracted text used by exact counting
+- Embedding metadata
 
-### OCR Engine
-The application uses `EasyOCR` for text extraction:
-- **Languages**: English and Arabic support built-in
-- **GPU Acceleration**: Automatically uses CUDA GPU when available, falls back to CPU
-- **Offline**: Downloads language models once (~100MB per language)
-- **Accurate**: Deep learning-based recognition
-- **Privacy**: All OCR processing happens locally
+Image cache keys include the Gemini OCR pipeline version. This means:
 
-### Embedding Model
-The application uses `sentence-transformers/all-MiniLM-L6-v2` for generating embeddings:
-- **Optimized**: Specifically designed for semantic similarity
-- **Fast**: Lightweight model (~90MB) with quick inference
-- **GPU Support**: Automatically uses CUDA GPU when available, falls back to CPU
-- **Offline**: Model downloads once and works completely offline
-- **Reliable**: No dependency on external services
+- An old EasyOCR-generated image index is not reused.
+- An unchanged Gemini-processed image reuses its existing index and does not upload the image again.
+- Modifying an image or changing the OCR pipeline version creates a new index.
+- PDF, DOCX, TXT, and pasted-text keys are not invalidated by OCR changes.
 
-### Chunking Parameters
-- **Chunk size**: 1200 characters
-- **Overlap**: 200 characters
-- **Embedding model**: sentence-transformers/all-MiniLM-L6-v2 (fixed)
+Old EasyOCR weights and old image indexes are not deleted automatically. They can be removed manually if disk space is needed:
 
-### Storage Location
-- Vector stores are saved in `%APPDATA%/AI Document Analyzer/vector_store/`
-- Each document gets a unique key based on file path, size, and modification time
-- Persistent storage ensures fast reloading
+```text
+%APPDATA%/AI Document Analyzer/models/easyocr/
+```
 
-## Benefits
+## Q&A behavior
 
-### Performance
-- Handles documents of any size without memory issues
-- Fast Q&A responses using vector similarity search
-- Efficient storage with automatic deduplication
+Semantic questions use Gemini Embedding 2 to retrieve relevant chunks from local Qdrant. Exact counting reads the complete raw transcription or extracted text rather than only retrieved chunks. Both Gemini and Ollama use the same indexed document content.
 
-### Privacy
-- All processing done locally
-- No document content sent to external services
-- Complete offline capability
+## Common errors
 
-### Accuracy
-- Context-aware Q&A using relevant document chunks
-- Better summarization for large documents
-- Maintains document structure and meaning
+- Missing key: add the Gemini API key in Settings.
+- Invalid key: verify the key in Google AI Studio and update Settings.
+- Quota/rate limit: wait for quota reset or check billing/quota configuration.
+- Network timeout: check the internet connection and retry.
+- Models unavailable: confirm the account can access at least one configured Flash-Lite model (Gemini 2.5, 3.1, or 3.5).
+- Unsupported/damaged image: use a readable PNG, JPG, or JPEG.
+- No readable text: use a clearer image containing visible text.
+- Safety block: retry with a different image.
 
-## Configuration
+## Dependencies
 
-### GPU Acceleration
-The application automatically detects and uses NVIDIA CUDA GPUs when available:
-- **Automatic Detection**: No configuration needed
-- **CPU Fallback**: Works seamlessly on systems without GPU
-- **Performance Boost**: Significantly faster embedding generation with GPU
-- **Requirements**: CUDA-compatible GPU with appropriate PyTorch installation
+Runtime document processing uses:
 
-## Troubleshooting
+- google-genai for Gemini OCR, summaries, Q&A, and embeddings
+- qdrant-client for local vector storage
+- langchain text splitters, with a dependency-free chunking fallback
+- PyPDF2 and python-docx for document extraction
+- ollama for optional local final-generation models
 
-### Common Issues
-
-**"Qdrant is not available"**
-- Run: `pip install qdrant-client>=1.7.0`
-- Reinstall dependencies from requirements.txt
-- Works with any Python version (3.8+)
-
-**"EasyOCR not installed"**
-- Run: `pip install easyocr>=1.7.0 Pillow>=10.0.0`
-- First run will download OCR models (~100MB per language)
-- Ensure sufficient disk space
-
-**"Failed to process image/document"**
-- Check file is not corrupted or password-protected
-- Ensure sufficient disk space for vector store
-- Verify Qdrant and EasyOCR installed correctly
-- For images: ensure image contains readable text
-
-**"No text detected in the image"**
-- Image may be blank or contain only graphics
-- Try higher quality/resolution image
-- Ensure text is clearly visible and not handwritten
-- Check image is not corrupted
-
-**Slow OCR processing**
-- First-time processing downloads OCR models (one-time)
-- CPU-only OCR can be slow for large/complex images
-- GPU acceleration significantly speeds up OCR
-- Install CUDA-enabled PyTorch for GPU support
-
-**Slow initial processing**
-- First-time chunking can take time for large documents
-- Subsequent loads are instant
-- Consider using CUDA GPU for faster embeddings and OCR
-
-**Poor Q&A quality**
-- Ensure document/image was processed successfully
-- Try asking more specific questions
-- Check that vector store was created properly
-- For images: verify OCR extracted text correctly
-
-### Manual Cleanup
-To remove stored vector data:
-1. Close the application
-2. Delete the `vector_store` folder in `%APPDATA%/AI Document Analyzer/`
-3. Restart the application
-
-## Compatibility
-- **Supported Formats**: PDF, DOCX, TXT, PNG, JPG, JPEG
-- **Images**: All image formats processed with OCR + RAG pipeline
-- **AI Backends**: Compatible with both Ollama (offline) and Gemini (online)
-- **GPU Support**: Automatic CUDA acceleration for both OCR and embeddings
-- **Languages**: English and Arabic OCR support
-- Maintains backward compatibility with existing documents
+EasyOCR, Torch, torchvision, OpenCV, scikit-image, SciPy, and scikit-learn are not part of the active OCR pipeline or supported package build.

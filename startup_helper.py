@@ -9,8 +9,6 @@ class InitializationWorker(QObject):
     """Worker thread for heavy initialization tasks."""
     progress = pyqtSignal(str)
     finished = pyqtSignal()
-    offline_progress = pyqtSignal(float, str)
-    offline_state_ready = pyqtSignal(dict)
     
     def __init__(self, window):
         super().__init__()
@@ -27,28 +25,7 @@ class InitializationWorker(QObject):
             # Step 2: Initialize document manager (heavy - loads Qdrant)
             self.progress.emit("Loading document manager")
             from large_doc_manager import LargeDocumentManager
-            self.window.large_doc_manager = LargeDocumentManager(
-                self.window.app_config_dir,
-                api_key_provider=self.window._get_gemini_key,
-            )
-
-            # Step 2.1: Prepare offline OCR assets
-            try:
-                self.progress.emit("Preparing OCR models")
-                from offline_bootstrap import prepare_offline_assets
-
-                def _progress_callback(percent: float, message: str) -> None:
-                    self.offline_progress.emit(percent, message)
-
-                state = prepare_offline_assets(
-                    self.window.large_doc_manager.models_dir,
-                    state_path=getattr(self.window, "offline_state_path", None),
-                    progress_callback=_progress_callback,
-                )
-                self.offline_state_ready.emit(state)
-            except Exception as e:
-                # Non-fatal; app can still operate, but OCR weights may download later if online
-                print(f"Offline bootstrap warning: {e}")
+            self.window.large_doc_manager = LargeDocumentManager(self.window.app_config_dir)
 
             # Step 3: Initialize state variables
             self.progress.emit("Initializing state")
@@ -56,17 +33,11 @@ class InitializationWorker(QObject):
             self.window._pending_analysis_params = None
             self.window._processing_thread = None
             self.window._processing_worker = None
-            self.window._ocr_reader = None
-            
+
             # Step 4: Set up model list
             self.progress.emit("Loading models")
-            self.window.online_models_gemini = [
-                "gemini-2.5-flash",
-                "gemini-flash-lite-latest",
-                "gemini-flash-latest",
-                "gemini-2.5-pro",
-                "gemini-2.5-flash-lite",
-            ]    
+            from gemini_fallback import GEMINI_MODEL_FALLBACK_LABEL
+            self.window.online_models_gemini = [GEMINI_MODEL_FALLBACK_LABEL]
             
             # Step 5/6: Defer any UI population and model refresh to main thread
             self.progress.emit("Loading available models")

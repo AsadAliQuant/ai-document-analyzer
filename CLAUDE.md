@@ -61,9 +61,15 @@ clear_vector_store.bat
 ### Document Processing Pipeline
 `large_doc_manager.py` (`LargeDocumentManager`):
 - Runs Qdrant embedded (no server); storage at `%APPDATA%/AI Document Analyzer/vector_store/`
-- Embeddings: `sentence-transformers/all-MiniLM-L6-v2`
+- Embeddings: `gemini-embedding-2` through `google-genai`
 - Chunking: 1200 chars, 200 char overlap; has a dependency-free fallback splitter for packaged builds
-- Document keys: MD5 of `filepath::size::mtime` — re-processes only on file change
+- Document keys: MD5 of `filepath::size::mtime`; image keys also include `GEMINI_OCR_PIPELINE_VERSION`
+
+`gemini_ocr.py`:
+- Sends PNG/JPG/JPEG bytes through the ordered fallback chain `gemini-2.5-flash-lite` → `gemini-3.1-flash-lite` → `gemini-3.5-flash-lite` when a model is unavailable
+- Returns transcription only; summarization remains a separate downstream step
+- Requires the existing Gemini key and internet connection
+- The full image is sent to Google; unchanged Gemini-OCR image indexes are cached locally
 
 ### Authentication & Licensing
 - `auth.py` — `AuthState` singleton holds access token in memory; refresh token persisted in system keyring (`keyring` library, service `"ai_document_analyzer"`)
@@ -71,11 +77,8 @@ clear_vector_store.bat
 - `lock_manager.py` — `LockManager` polls a remote CSV every 60s; encrypts lock state locally with Fernet (key derived from hardcoded secret, overridable via `AI_DOC_LOCK_KEY` env var). Tampered state file defaults to LOCKED.
 
 ### AI Backends
-- **Online (Gemini)**: `google-generativeai` package. Models: `gemini-2.5-flash`, `gemini-2.5-pro`, `gemini-2.5-flash-lite`, `gemini-flash-latest`, `gemini-flash-lite-latest`
+- **Online (Gemini)**: `google-genai` package. Generation fallback order: `gemini-2.5-flash-lite`, `gemini-3.1-flash-lite`, `gemini-3.5-flash-lite`
 - **Offline (Ollama)**: `ollama` Python client; requires local Ollama daemon running
-
-### Offline Model Bootstrap
-`offline_bootstrap.py` — copies bundled models from `./models/` to the user's app data dir on first run. Runtime downloads are gated by `AIDA_RUNTIME_PREFETCH=1` env var (always `0` in packaged builds).
 
 ### Settings
 - `settings_window.py` / `ui_settings_window.py` — dialog for Gemini API key and language
@@ -85,15 +88,16 @@ clear_vector_store.bat
 ## Key Patterns
 
 ### Threading Model
-UI always on main thread. Background operations use `QThread` + `QObject` worker pattern:
-- `InitializationWorker` (in `startup_helper.py`) — Qdrant init, offline model bootstrap
-- Analysis workers and Q&A workers defined inline in `main_window.py`
+UI always runs on the main thread. Background operations use the `QThread` + `QObject` worker pattern:
+- `InitializationWorker` (in `startup_helper.py`) initializes the document manager and model list
+- Image OCR, document indexing, analysis, and Q&A run in workers defined in `main_window.py`
+- Processing success and error signals both terminate and clean up their worker thread
 
 ### Optional Imports
-`main_window.py` wraps all heavy optional dependencies in `try/except` blocks (`PyPDF2`, `python-docx`, `google.generativeai`, `ollama`, `PIL`). Never assume these are available without checking the module-level guard variable (e.g., `_ocr_available`).
+`main_window.py` wraps optional document and AI dependencies in `try/except` blocks (`PyPDF2`, `python-docx`, `google-genai`, `ollama`). `gemini_ocr.py` imports `google-genai` lazily and reports a stable `sdk_missing` error.
 
 ### Prompt Updates
-`update_all_prompts.py` is a one-shot script that does string replacement directly into `main_window.py`. Run it when you need to bulk-update prompt text across both Ollama and Gemini, English and Arabic variants.
+`update_all_prompts.py` is a retired compatibility entry point and does not modify source code. Edit OCR instructions in `gemini_ocr.py`, edit summary/Q&A prompts in `main_window.py`, and keep `PROMPTS_DOCUMENTATION.txt` synchronized manually.
 
 ### Language Support
 English and Arabic toggled via `apply_language()` in `MainWindow`. All user-facing strings have both `_en` and `_ar` variants in `main_window.py`.
@@ -102,17 +106,17 @@ English and Arabic toggled via `apply_language()` in `MainWindow`. All user-faci
 CSV format: A1=`1` means locked (any other value = unlocked). A2=custom message shown in `LockOverlay`. Lock state is cached locally encrypted; if decryption fails (tampered file), app stays locked.
 
 ## File Structure Notes
-- `%APPDATA%/AI Document Analyzer/` — user config, vector store, offline state, `cache.txt` (encrypted lock state), app log
-- `models/` — cached HuggingFace and EasyOCR models for bundling
+- `%APPDATA%/AI Document Analyzer/` — user config, vector store, `cache.txt` (encrypted lock state), app log, and possibly stale pre-migration OCR files
 - `assets/` — UI icons; `create_icon.py` regenerates the app icon
 - `dist/` — built executable output
 - `app.spec` — PyInstaller single-file build config; `app_folder.spec` — folder build variant
 
 ## Build Configuration
 `app.spec` targets a single-file Windows EXE. Key concerns:
-- All ML models and EasyOCR weights must be bundled as data files
-- Extensive `hiddenimports` for LangChain, Qdrant, transformers, sentence-transformers
-- `AIDA_RUNTIME_PREFETCH` forced to `"0"` in packaged builds via `main.py`
+- Bundle `google-genai` for OCR, summaries, Q&A, and embeddings
+- Bundle Qdrant, minimal LangChain text splitting, document readers, Ollama, auth, and cryptography dependencies
+- Explicitly exclude EasyOCR, Torch, torchvision, OpenCV, scikit-image, SciPy, scikit-learn, and ImageIO
+- Validate package contents from a clean Python 3.11 environment
 
 ## Migration History
 Migrated from ChromaDB/FAISS to Qdrant for Python 3.11+ compatibility. See `PYTHON_3.11_MIGRATION.md` and `QDRANT_MIGRATION.md` for details.

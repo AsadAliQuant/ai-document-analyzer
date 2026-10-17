@@ -3,16 +3,8 @@ import sys
 import faulthandler
 import json
 
-# Set stability/env flags BEFORE any heavy ML/DB imports
-os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
+# Limit native-library worker threads before document-processing imports.
 os.environ.setdefault("OMP_NUM_THREADS", "1")
-os.environ.setdefault("TOKENIZERS_PARALLELISM", "false")
-# Never allow background model downloads in packaged builds
-if getattr(sys, "frozen", False):
-    os.environ["AIDA_RUNTIME_PREFETCH"] = "0"
-# Strongly prefer Local (Python) Chroma API over Rust backend on Windows
-os.environ.setdefault("CHROMA_DISABLE_TELEMETRY", "true")
-os.environ.setdefault("POSTHOG_DISABLED", "1")
 
 try:
     if getattr(sys, "stderr", None):

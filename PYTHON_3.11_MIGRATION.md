@@ -1,5 +1,7 @@
 # Python Version Compatibility Guide
 
+> **Current-state note (2026-10-16):** Any EasyOCR, Torch, local OCR model, or sentence-transformers instructions below are historical and superseded. Image transcription now uses the Gemini 2.5 → 3.1 → 3.5 Flash-Lite fallback chain, embeddings use Gemini Embedding 2, and Qdrant remains local. See `LARGE_DOC_GUIDE.md`.
+
 ## Current Vector Store: Qdrant
 
 The application now uses **Qdrant** as the vector database, which is compatible with Python 3.8+ including Python 3.11, 3.12, and 3.13. Qdrant runs embedded (in-process) and requires no external server.

@@ -1,244 +1,144 @@
 # -*- mode: python ; coding: utf-8 -*-
-"""
-PyInstaller spec file for AI Document Analyzer
-Bundles all dependencies into a single EXE for Windows 10/11
-"""
+"""PyInstaller single-file build for AI Document Analyzer."""
 
-import sys
 import os
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
-block_cipher = None
 
-# Collect all data and binaries for key packages
+block_cipher = None
 datas = []
 binaries = []
 hiddenimports = []
 
-# Core packages that need full collection
 packages_to_collect = [
-    'PyQt6',
-    'langchain',
-    'langchain_core',
-    'langchain_text_splitters',
-    'torch',
-    'torchvision',
-    'numpy',
-    'qdrant_client',
-    'grpc',
-    'grpcio',
-    'easyocr',
-    'skimage',
-    'scikit-image',
-    'imageio',
-    'cv2',
-    'PIL',
-    'Pillow',
-    'PyPDF2',
-    'docx',
-    'ollama',
-    'google',
-    'google.generativeai',
-    'google.genai',
-    'google.ai',
-    'keyring',
-    'jaraco',
-    'requests',
-    'cryptography',
-    'scipy',
-    'sklearn',
-    'imageio',
-    'networkx',
-    'tifffile',
-    'lazy_loader',
-    'pooch',
+    "langchain_core",
+    "langchain_text_splitters",
+    "qdrant_client",
+    "PyPDF2",
+    "docx",
+    "ollama",
+    "google.genai",
+    "keyring",
+    "cryptography",
 ]
 
-for pkg in packages_to_collect:
+for package in packages_to_collect:
     try:
-        pkg_datas, pkg_binaries, pkg_hiddenimports = collect_all(pkg)
-        datas += pkg_datas
-        binaries += pkg_binaries
-        hiddenimports += pkg_hiddenimports
-    except Exception as e:
-        print(f"Warning: Could not collect {pkg}: {e}")
+        package_datas, package_binaries, package_hiddenimports = collect_all(package)
+        datas += package_datas
+        binaries += package_binaries
+        hiddenimports += package_hiddenimports
+    except Exception as exc:
+        print(f"Warning: Could not collect {package}: {exc}")
 
-# Additional submodules that might be missed
-extra_submodules = [
-    'qdrant_client.models',
-    'qdrant_client.http',
-    'qdrant_client.http.models',
-    'grpc._cython',
-    'google.protobuf',
-    'google.auth',
-    'scipy',
-    'scipy.special',
-    'sklearn',
-    'sklearn.utils',
-    'sklearn.neighbors',
-    'tqdm',
-    'filelock',
-    'regex',
-    'requests',
-    'urllib3',
-    'certifi',
-    'charset_normalizer',
-    'httpx',
-    'httpcore',
-    'anyio',
-    'sniffio',
-    'h11',
-    'pydantic',
-    'pydantic_core',
-    'typing_extensions',
-    'annotated_types',
-]
-
-for submod in extra_submodules:
+for submodule in [
+    "qdrant_client.models",
+    "qdrant_client.http",
+    "qdrant_client.http.models",
+    "grpc._cython",
+    "google.protobuf",
+    "google.auth",
+    "requests",
+    "urllib3",
+    "certifi",
+    "charset_normalizer",
+    "httpx",
+    "httpcore",
+    "anyio",
+    "sniffio",
+    "h11",
+    "pydantic",
+    "pydantic_core",
+    "typing_extensions",
+    "annotated_types",
+]:
     try:
-        hiddenimports += collect_submodules(submod)
+        hiddenimports += collect_submodules(submodule)
     except Exception:
-        hiddenimports.append(submod)
+        hiddenimports.append(submodule)
 
-# Explicit hidden imports for tricky modules
-explicit_hiddenimports = [
-    'langchain_text_splitters',
-    'langchain_text_splitters.character',
-    'langchain_text_splitters.base',
-    'langchain_text_splitters.rec',
-    'langchain_text_splitters.text_splitter',
-    'langchain.text_splitter',
-    'langchain.schema',
-    'langchain_core',
-    'langchain_core.documents',
-    'langchain_core.documents.base',
-    'langchain_core.pydantic_v1',
-    'google.genai',
-    'google.genai.types',
-    'torch',
-    'torch.nn',
-    'torch.nn.functional',
-    'torchvision',
-    'easyocr',
-    'easyocr.easyocr',
-    'easyocr.recognition',
-    'easyocr.detection',
-    'easyocr.craft',
-    'easyocr.craft_utils',
-    'easyocr.imgproc',
-    'easyocr.utils',
-    'easyocr.config',
-    'easyocr.model',
-    'easyocr.model.vgg_model',
-    'easyocr.model.modules',
-    'easyocr.trainer',
-    'easyocr.character',
-    'skimage',
-    'skimage.transform',
-    'skimage.io',
-    'skimage.color',
-    'skimage.filters',
-    'skimage.morphology',
-    'skimage.feature',
-    'skimage._shared',
-    'skimage._shared.geometry',
-    'skimage.util',
-    'skimage.util.dtype',
-    'imageio',
-    'imageio.core',
-    'imageio.plugins',
-    'cv2',
-    'numpy',
-    'numpy.core',
-    'numpy.core._methods',
-    'numpy.lib',
-    'numpy.lib.format',
-    'PIL',
-    'PIL.Image',
-    'PIL.ImageDraw',
-    'PIL.ImageFont',
-    'qdrant_client',
-    'qdrant_client.local',
-    'qdrant_client.qdrant_local',
-    'sqlite3',
-    'pkg_resources',
-    'pkg_resources.extern',
-    'jaraco',
-    'jaraco.classes',
-    'jaraco.functools',
-    'jaraco.context',
-    'keyring',
-    'keyring.backends',
-    'keyring.backends.Windows',
-    'win32timezone',
-    'pythoncom',
-    'pywintypes',
-    'win32api',
-    'win32con',
-    'win32cred',
-    'offline_bootstrap',
-    'startup_helper',
-    'large_doc_manager',
-    'lock_manager',
-    'lock_overlay',
-    'login_overlay',
-    'login_dialog',
-    'settings_window',
-    'auth',
-    'ui_main_window',
-    'ui_settings_window',
+hiddenimports += [
+    "langchain_text_splitters",
+    "langchain_text_splitters.character",
+    "langchain_text_splitters.base",
+    "langchain_core.documents",
+    "google.genai",
+    "google.genai.types",
+    "numpy",
+    "qdrant_client",
+    "qdrant_client.local",
+    "qdrant_client.qdrant_local",
+    "sqlite3",
+    "pkg_resources",
+    "jaraco",
+    "jaraco.classes",
+    "jaraco.functools",
+    "jaraco.context",
+    "keyring",
+    "keyring.backends",
+    "keyring.backends.Windows",
+    "win32timezone",
+    "pythoncom",
+    "pywintypes",
+    "win32api",
+    "win32con",
+    "win32cred",
+    "gemini_fallback",
+    "gemini_ocr",
+    "startup_helper",
+    "large_doc_manager",
+    "lock_manager",
+    "lock_overlay",
+    "login_overlay",
+    "login_dialog",
+    "settings_window",
+    "auth",
+    "ui_main_window",
+    "ui_settings_window",
 ]
-
-hiddenimports += explicit_hiddenimports
-
-# Remove duplicates
 hiddenimports = list(set(hiddenimports))
 
-# Add application data files (only if they exist)
-app_datas = []
+for source, destination in [
+    ("assets", "assets"),
+    ("styles.qss", "."),
+    ("config.json", "."),
+    ("prompts.txt", "."),
+]:
+    if os.path.isdir(source) or os.path.isfile(source):
+        datas.append((source, destination))
 
-if os.path.isdir('assets'):
-    app_datas.append(('assets', 'assets'))
-
-if os.path.isfile('styles.qss'):
-    app_datas.append(('styles.qss', '.'))
-
-if os.path.isfile('config.json'):
-    app_datas.append(('config.json', '.'))
-
-if os.path.isfile('prompts.txt'):
-    app_datas.append(('prompts.txt', '.'))
-
-# Bundle only EasyOCR weights; embedding vectors are generated through Gemini.
-easyocr_models_dir = os.path.join('models', 'easyocr')
-if os.path.isdir(easyocr_models_dir) and os.listdir(easyocr_models_dir):
-    app_datas.append((easyocr_models_dir, os.path.join('models', 'easyocr')))
-
-datas += app_datas
-
-# Print what we're including for debugging
 print(f"Including {len(hiddenimports)} hidden imports")
-print(f"Including {len(app_datas)} application data items: {[d[0] for d in app_datas]}")
 
-# Analysis
 a = Analysis(
-    ['main.py'],
+    ["main.py"],
     pathex=[],
     binaries=binaries,
     datas=datas,
     hiddenimports=hiddenimports,
-    hookspath=['hooks'],
+    hookspath=[],
     hooksconfig={},
-    runtime_hooks=['hooks/rthook_imports.py'],
+    runtime_hooks=[],
     excludes=[
-        'matplotlib',
-        'tkinter',
-        'IPython',
-        'jupyter',
-        'notebook',
-        'pytest',
-        'sphinx',
-        'PyQt5',  # Exclude PyQt5 if using PyQt6
+        "easyocr",
+        "sentence_transformers",
+        "transformers",
+        "tokenizers",
+        "safetensors",
+        "torch",
+        "torchvision",
+        "cv2",
+        "skimage",
+        "scipy",
+        "sklearn",
+        "imageio",
+        "matplotlib",
+        "tkinter",
+        "IPython",
+        "jupyter",
+        "notebook",
+        "pytest",
+        "sphinx",
+        "PyQt5",
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
@@ -255,14 +155,14 @@ exe = EXE(
     a.zipfiles,
     a.datas,
     [],
-    name='AI Document Analyzer',
+    name="AI Document Analyzer",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=False,  # No console window
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -270,6 +170,6 @@ exe = EXE(
     entitlements_file=None,
     uac_admin=False,
     uac_uiaccess=False,
-    manifest='manifest.xml',
-    icon='assets/logo.ico' if os.path.exists('assets/logo.ico') else None,
+    manifest="manifest.xml",
+    icon="assets/logo.ico" if os.path.exists("assets/logo.ico") else None,
 )

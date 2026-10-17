@@ -1,128 +1,110 @@
-build# AI Document Analyzer - Windows Desktop Application
+# AI Document Analyzer — Windows Deployment
 
 ## Overview
-This is a PyQt6-based desktop application for AI-powered document analysis, supporting both offline (Ollama) and online (Google Gemini) AI models.
 
-## Building the Windows Application
+AI Document Analyzer is a PyQt6 desktop application for document summarization, RAG-powered Q&A, and exact counting. It supports Google Gemini and optional Ollama generation models.
 
-### Prerequisites
-- Python 3.8+ installed
-- All dependencies from `requirements.txt`
-- PyInstaller (installed automatically by build scripts)
-- NSIS (optional, for creating installer)
+## Requirements
 
-### Quick Build
-1. Run `build_complete.bat` for a complete build with installer
-2. Or run `build_windows.bat` for just the executable
+### Development
 
-### Manual Build Steps
-```bash
-# Install dependencies
-pip install -r requirements.txt
-pip install pyinstaller
+- Windows 10 or 11 (64-bit)
+- Python 3.11
+- The `.venv311` virtual environment
+- Dependencies from `requirements.txt`
+- PyInstaller for packaged builds
+- NSIS only when creating the installer
 
-# Build executable
-pyinstaller "AI Document Analyzer.spec"
+### End users
+
+- No Python installation for packaged builds
+- A Gemini API key and internet connection for document embeddings
+- A Gemini API key and internet connection for new PNG/JPG/JPEG OCR
+- Ollama installed and running only when using Ollama for final summary/Q&A generation
+
+## Privacy and online processing
+
+- The full uploaded image is sent to Gemini 2.5 Flash-Lite for OCR. If that model is unavailable, the app tries Gemini 3.1 Flash-Lite and then Gemini 3.5 Flash-Lite.
+- Extracted chunks are sent to Gemini Embedding 2 to create vectors.
+- Qdrant and its vector/index files remain local under `%APPDATA%/AI Document Analyzer/vector_store/`.
+- Gemini quota or billing rules may apply.
+- Selecting Ollama keeps final text generation local, but new image OCR and all new document embeddings still depend on Gemini.
+- Scanned-PDF OCR is not supported in this release.
+
+Unchanged Gemini-processed images reuse their local index and do not require another OCR request. Old EasyOCR caches are left untouched and can be deleted manually from `%APPDATA%/AI Document Analyzer/models/easyocr/` if desired.
+
+## Supported inputs
+
+- PDF (text-based)
+- DOCX
+- TXT
+- PNG, JPG, JPEG
+- Pasted text
+
+## Source setup
+
+```bat
+py -3.11 -m venv .venv311
+.venv311\Scripts\python.exe -m pip install -r requirements.txt
+.venv311\Scripts\python.exe main.py
 ```
 
-## Distribution Files
+Add the Gemini API key through the application's Settings dialog.
 
-### Executable Only
-- **Location**: `dist/AI Document Analyzer.exe`
-- **Size**: ~50-100 MB (includes all dependencies)
-- **Requirements**: None (standalone executable)
+## Build commands
 
-### Windows Installer
-- **Location**: `AI_Document_Analyzer_Setup.exe` (after running build_complete.bat)
-- **Features**: 
-  - Desktop shortcut
-  - Start menu entry
-  - Uninstaller
-  - Windows registry integration
+```bat
+REM Recommended single-file build with import checks
+build_exe.bat
 
-## Application Features
+REM One-folder build for faster packaging iteration
+build_folder.bat
 
-### Supported File Types
-- **Documents**: PDF, DOCX, TXT
-- **Images**: PNG, JPG, JPEG
-- **Text Input**: Direct paste/typing
+REM Single-file build driven by app.spec
+build_complete.bat
 
-### AI Models
-- **Offline**: Ollama with LLaMA models
-- **Online**: Google Gemini models
+REM Console-enabled diagnostic build
+build_debug.bat
+```
 
-### Key Features
-- Document text extraction
-- AI-powered summarization
-- Q&A chat interface
-- PDF export
-- Multi-language support (English/Arabic)
-- System tray integration
+Build from a clean Python 3.11 environment. Do not reuse an environment merely because removed OCR/ML packages remain installed there.
 
-## Installation Requirements
+## Clean-build acceptance checks
 
-### For End Users
-- Windows 10/11 (64-bit)
-- No additional software required (standalone executable)
+1. Install the updated requirements.
+2. Run `python -m pip check`.
+3. Run all unit tests.
+4. Build and test the one-folder artifact.
+5. Build and test the single-file artifact.
+6. Confirm the output does not contain EasyOCR, Torch, torchvision, OpenCV, scikit-image, SciPy, scikit-learn, old OCR weights, or `offline_bootstrap`.
+7. Test English, Arabic, mixed-language, table, blank, damaged, missing-key, invalid-key, offline, quota, and model-unavailable image cases.
+8. Test PDF, DOCX, TXT, pasted text, Gemini summaries, Ollama summaries, Q&A, and exact counting.
+9. Measure artifact size and cold-start time on a clean Windows account before publishing claims.
 
-### For Ollama Integration
-- Ollama installed and running
-- LLaMA models downloaded via Ollama
-- For large document processing: Embedding model (default: `nomic-embed-text`, configurable in Settings)
+## Output
 
-### For Gemini Integration
-- Google API key (configured in settings)
+- Single-file: `dist\AI Document Analyzer.exe`
+- One-folder: `dist\AI Document Analyzer\`
+- Installer output depends on `installer.nsi`
 
-## Configuration
+## Latest local measurements
 
-### First Run
-- Application creates config directory: `%APPDATA%/AI Document Analyzer/`
-- Copies `config.json` from installation directory if present
+Measured on Windows 10 on October 16, 2026 from the existing `.venv311` environment:
 
-### Settings
-- Access via Settings button in application
-- Configure API keys and preferences
-- Configure embedding model for large document processing
-- Language selection (English/Arabic)
+- Latest one-folder package after consolidating all Gemini generation on `google-genai`: 217.41 MiB across 1,576 files, with 7.79-second first-run input-idle startup.
+- Earlier single-file measurement before the SDK consolidation: 105.48 MiB, with 10.91 seconds on the first run and 5.70/6.51 seconds on subsequent runs. Rebuild before relying on this single-file figure.
+- Package inspection found no deprecated `google-generativeai` SDK, EasyOCR, Torch, torchvision, OpenCV, scikit-image, SciPy, scikit-learn, ImageIO, or `offline_bootstrap` payloads. The file `langchain_text_splitters/sentence_transformers.py` is a LangChain helper name, not the removed `sentence-transformers` package.
+
+These are local development-machine measurements, not clean-account or end-user benchmarks. Repeat the acceptance checks on a clean Windows account before publishing performance claims.
 
 ## Troubleshooting
 
-### Common Issues
-1. **"Ollama not available"**: Install Ollama and start the service
-2. **"Missing API key"**: Add Google API key in Settings
-3. **File extraction errors**: Ensure file is not corrupted or password-protected
+- **Gemini key missing or rejected:** update the key in Settings.
+- **Image OCR cannot connect or times out:** check internet access and retry.
+- **Quota reached:** wait for quota reset or inspect Google API billing/quota.
+- **OCR models unavailable:** verify access to at least one configured model: Gemini 2.5, 3.1, or 3.5 Flash-Lite.
+- **No readable image text:** try a clearer PNG/JPG/JPEG.
+- **Ollama unavailable:** install/start Ollama and select a chat model.
+- **File extraction error:** verify that the document is readable and not password protected.
 
-### Logs
-- Application logs are stored in `%APPDATA%/AI Document Analyzer/`
-- Check Windows Event Viewer for system-level issues
-
-## Development
-
-### Project Structure
-```
-app_gptUI/
-├── main.py                 # Application entry point
-├── main_window.py          # Main application logic
-├── settings_window.py      # Settings dialog
-├── ui_main_window.py       # UI definitions
-├── ui_settings_window.py   # Settings UI
-├── assets/                 # Icons and images
-├── styles.qss             # Application styling
-├── config.json            # Default configuration
-├── requirements.txt       # Python dependencies
-├── AI Document Analyzer.spec  # PyInstaller configuration
-└── build scripts          # Build automation
-```
-
-### Building for Distribution
-1. Test the application thoroughly
-2. Update version numbers in installer.nsi
-3. Run `build_complete.bat`
-4. Test the installer on a clean Windows system
-5. Distribute `AI_Document_Analyzer_Setup.exe`
-
-## License
-[Add your license information here]
-
-## Support
-[Add support contact information here]
+Application data and logs are stored under `%APPDATA%/AI Document Analyzer/`.

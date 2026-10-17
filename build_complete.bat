@@ -17,10 +17,13 @@ set SPEC_FILE=app.spec
 set DIST_DIR=dist
 set BUILD_DIR=build
 
-REM Pick Python interpreter (prefer local venv)
-set "PYEXE=python"
-if exist ".venv\Scripts\python.exe" (
-    set "PYEXE=.venv\Scripts\python.exe"
+REM Use the project's required Python 3.11 virtual environment
+set "PYEXE=.venv311\Scripts\python.exe"
+if not exist "%PYEXE%" (
+    echo ERROR: Python 3.11 virtual environment not found at .venv311
+    echo Create it and install requirements before building.
+    popd
+    exit /b 1
 )
 echo ============================================================
 echo Using Python: %PYEXE%
@@ -30,7 +33,7 @@ REM ------------------------------------------------------------
 REM Ensure all required packages are installed
 REM ------------------------------------------------------------
 echo.
-echo [1/4] Checking and installing required packages...
+echo [1/3] Checking and installing required packages...
 "%PYEXE%" -m pip install --upgrade pip >nul 2>&1
 
 REM Install PyInstaller if missing
@@ -57,27 +60,15 @@ REM ------------------------------------------------------------
 REM Clean previous builds
 REM ------------------------------------------------------------
 echo.
-echo [2/4] Cleaning previous build artifacts...
+echo [2/3] Cleaning previous build artifacts...
 if exist "%DIST_DIR%" rmdir /S /Q "%DIST_DIR%"
 if exist "%BUILD_DIR%" rmdir /S /Q "%BUILD_DIR%"
-
-REM ------------------------------------------------------------
-REM Prefetch EasyOCR weights into ./models if available
-REM ------------------------------------------------------------
-echo.
-echo [3/4] Checking offline OCR models...
-if exist "offline_bootstrap.py" (
-    echo Prefetching missing EasyOCR weights into .\models ...
-    "%PYEXE%" offline_bootstrap.py --prefetch --target models
-) else (
-    echo Note: offline_bootstrap.py not found, skipping OCR model prefetch.
-)
 
 REM ------------------------------------------------------------
 REM Build using spec file
 REM ------------------------------------------------------------
 echo.
-echo [4/4] Building %APP_NAME% executable...
+echo [3/3] Building %APP_NAME% executable...
 echo This may take several minutes...
 echo.
 

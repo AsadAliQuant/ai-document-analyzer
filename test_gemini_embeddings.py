@@ -1,8 +1,10 @@
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
 
+from gemini_ocr import GEMINI_OCR_PIPELINE_VERSION
 from large_doc_manager import GeminiEmbeddingClient, LargeDocumentManager
 
 
@@ -32,6 +34,10 @@ class _FakeModels:
 class _FakeClient:
     def __init__(self):
         self.models = _FakeModels()
+        self.closed = False
+
+    def close(self):
+        self.closed = True
 
 
 class GeminiEmbeddingClientTests(unittest.TestCase):
@@ -65,6 +71,15 @@ class GeminiEmbeddingClientTests(unittest.TestCase):
             "task: question answering | query: What is the conclusion?",
         )
 
+    def test_close_releases_sdk_client(self):
+        embedding_client = GeminiEmbeddingClient("test-key")
+        fake_client = _FakeClient()
+        embedding_client._client = fake_client
+
+        embedding_client.close()
+
+        self.assertTrue(fake_client.closed)
+
     def test_rate_limit_error_is_user_friendly(self):
         error = GeminiEmbeddingClient._friendly_error(Exception("429 RESOURCE_EXHAUSTED"))
         self.assertIn("free-tier limit", str(error))
@@ -93,10 +108,70 @@ class _FakeEmbeddingClient:
         return [1.0] * GeminiEmbeddingClient.DIMENSION
 
 
+class DocumentKeyTests(unittest.TestCase):
+    def test_image_key_is_stable_for_same_pipeline(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "image.png"
+            image_path.write_bytes(b"image")
+            manager = LargeDocumentManager(temp_dir)
+
+            first = manager.compute_document_key(
+                str(image_path),
+                processing_version=GEMINI_OCR_PIPELINE_VERSION,
+            )
+            second = manager.compute_document_key(
+                str(image_path),
+                processing_version=GEMINI_OCR_PIPELINE_VERSION,
+            )
+
+            self.assertEqual(first, second)
+
+    def test_versioned_image_key_differs_from_old_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "image.jpg"
+            image_path.write_bytes(b"image")
+            manager = LargeDocumentManager(temp_dir)
+
+            old_key = manager.compute_document_key(str(image_path))
+            new_key = manager.compute_document_key(
+                str(image_path),
+                processing_version=GEMINI_OCR_PIPELINE_VERSION,
+            )
+
+            self.assertNotEqual(old_key, new_key)
+
+    def test_different_pipeline_version_changes_image_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            image_path = Path(temp_dir) / "image.jpeg"
+            image_path.write_bytes(b"image")
+            manager = LargeDocumentManager(temp_dir)
+
+            first = manager.compute_document_key(str(image_path), processing_version="ocr:v1")
+            second = manager.compute_document_key(str(image_path), processing_version="ocr:v2")
+
+            self.assertNotEqual(first, second)
+
+    def test_normal_document_keeps_legacy_key(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            document_path = Path(temp_dir) / "document.txt"
+            document_path.write_text("text", encoding="utf-8")
+            manager = LargeDocumentManager(temp_dir)
+            stat = os.stat(document_path)
+            payload = f"{os.path.abspath(document_path)}::{stat.st_size}::{int(stat.st_mtime)}"
+            try:
+                import hashlib
+                expected = hashlib.md5(payload.encode("utf-8"), usedforsecurity=False).hexdigest()
+            except TypeError:
+                import hashlib
+                expected = hashlib.md5(payload.encode("utf-8")).hexdigest()
+
+            self.assertEqual(manager.compute_document_key(str(document_path)), expected)
+
+
 class VectorStoreMetadataTests(unittest.TestCase):
     def test_old_embedding_store_is_invalidated(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            manager = LargeDocumentManager(temp_dir, api_key_provider=lambda: "test-key")
+            manager = LargeDocumentManager(temp_dir)
             doc_key = "old-store"
             store_dir = Path(manager.doc_store_path(doc_key))
             (store_dir / "qdrant_db").mkdir(parents=True)
@@ -109,7 +184,7 @@ class VectorStoreMetadataTests(unittest.TestCase):
 
     def test_current_embedding_store_is_recognized(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            manager = LargeDocumentManager(temp_dir, api_key_provider=lambda: "test-key")
+            manager = LargeDocumentManager(temp_dir)
             doc_key = "current-store"
             store_dir = Path(manager.doc_store_path(doc_key))
             (store_dir / "qdrant_db").mkdir(parents=True)
@@ -128,8 +203,8 @@ class VectorStoreMetadataTests(unittest.TestCase):
 
     def test_document_can_be_indexed_and_retrieved(self):
         with tempfile.TemporaryDirectory() as temp_dir:
-            manager = LargeDocumentManager(temp_dir, api_key_provider=lambda: "test-key")
-            manager._embedding = lambda: _FakeEmbeddingClient()
+            manager = LargeDocumentManager(temp_dir)
+            manager._embedding = lambda api_key=None: _FakeEmbeddingClient()
             doc_key = "rag-store"
 
             chunk_count = manager.prepare_document(

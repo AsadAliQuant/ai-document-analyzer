@@ -1,43 +1,38 @@
 # -*- mode: python ; coding: utf-8 -*-
+"""Alternate PyInstaller single-file build definition."""
+
 import os
 from PyInstaller.utils.hooks import collect_all
 
 
-datas = [('assets', 'assets'), ('styles.qss', '.'), ('config.json', '.')]
-easyocr_models_dir = os.path.join('models', 'easyocr')
-if os.path.isdir(easyocr_models_dir) and os.listdir(easyocr_models_dir):
-    datas.append((easyocr_models_dir, os.path.join('models', 'easyocr')))
-
+datas = [("assets", "assets"), ("styles.qss", "."), ("config.json", ".")]
 binaries = []
 hiddenimports = [
-    'google.genai',
-    'google.genai.types',
-    'qdrant_client.local',
-    'portalocker',
-    'keyring',
-    'keyring.backends',
+    "google.genai",
+    "google.genai.types",
+    "gemini_fallback",
+    "gemini_ocr",
+    "qdrant_client.local",
+    "portalocker",
+    "keyring",
+    "keyring.backends",
 ]
 
 for package in (
-    'langchain_text_splitters',
-    'langchain_core',
-    'qdrant_client',
-    'torch',
-    'scipy',
-    'sklearn',
-    'easyocr',
-    'google.generativeai',
-    'google.genai',
-    'keyring',
+    "langchain_text_splitters",
+    "langchain_core",
+    "qdrant_client",
+    "google.genai",
+    "keyring",
 ):
-    tmp_ret = collect_all(package)
-    datas += tmp_ret[0]
-    binaries += tmp_ret[1]
-    hiddenimports += tmp_ret[2]
+    package_datas, package_binaries, package_hiddenimports = collect_all(package)
+    datas += package_datas
+    binaries += package_binaries
+    hiddenimports += package_hiddenimports
 
 
 a = Analysis(
-    ['main.py'],
+    ["main.py"],
     pathex=[],
     binaries=binaries,
     datas=datas,
@@ -45,7 +40,20 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    excludes=[
+        "easyocr",
+        "sentence_transformers",
+        "transformers",
+        "tokenizers",
+        "safetensors",
+        "torch",
+        "torchvision",
+        "cv2",
+        "skimage",
+        "scipy",
+        "sklearn",
+        "imageio",
+    ],
     noarchive=False,
     optimize=0,
 )
@@ -57,7 +65,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
-    name='AI Document Analyzer',
+    name="AI Document Analyzer",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -70,5 +78,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['assets\\logo.ico'],
+    icon=["assets\\logo.ico"] if os.path.exists("assets/logo.ico") else None,
 )

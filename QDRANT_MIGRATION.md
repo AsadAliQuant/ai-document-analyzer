@@ -1,5 +1,7 @@
 # Qdrant Migration Guide
 
+> **Current-state note (2026-10-16):** Qdrant still runs locally, but historical sentence-transformers or EasyOCR references below are superseded. Embeddings now use Gemini Embedding 2, and image transcription uses the Gemini 2.5 → 3.1 → 3.5 Flash-Lite fallback chain. See `LARGE_DOC_GUIDE.md`.
+
 ## What Changed?
 
 Your AI Document Analyzer now uses **embedded Qdrant** instead of ChromaDB for vector storage. This provides:

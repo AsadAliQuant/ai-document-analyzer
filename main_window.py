@@ -25,9 +25,16 @@ import sys
 from ui_main_window import Ui_MainWindow
 from settings_window import SettingsWindow
 from typing import Optional, List
-import base64
-import mimetypes
 import locale
+from gemini_fallback import (
+    GEMINI_GENERATION_TIMEOUT_MS,
+    call_with_model_fallback,
+)
+from gemini_ocr import (
+    GEMINI_OCR_PIPELINE_VERSION,
+    GeminiOcrError,
+    extract_text_from_image,
+)
 from startup_helper import InitializationWorker, LoadingOverlayMixin
 from login_dialog import LoginDialog
 from login_overlay import LoginOverlay, LogoutOverlay
@@ -64,22 +71,16 @@ except Exception:
     Document = None  # type: ignore
 
 try:
-    import google.generativeai as genai  # type: ignore
+    from google import genai  # type: ignore
+    from google.genai import types as genai_types  # type: ignore
 except Exception:
     genai = None  # type: ignore
+    genai_types = None  # type: ignore
 
 try:
     import ollama as ollama_client  # Python client
 except Exception:
     ollama_client = None
-
-try:
-    from PIL import Image  # type: ignore
-    _ocr_available = True
-except Exception:
-    Image = None  # type: ignore
-    _ocr_available = False
-
 
 class MainWindow(LoadingOverlayMixin, QMainWindow):
     def __init__(self):
@@ -132,7 +133,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self._last_status_text = "Ready"
         # Default typing label base
         self._typing_label_base = "Assistant is typing"
-        self._offline_state: dict = {}
 
         # System tray icon for notifications
         self.tray_icon = None
@@ -212,9 +212,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         except Exception:
             pass
         self.config_path = os.path.join(self.app_config_dir, "config.json")
-        self.offline_state_path = os.path.join(self.app_config_dir, "offline_state.json")
-        self._offline_state = self._load_offline_state()
-        self._apply_offline_state_to_settings()
 
         # Initialize attributes that will be set by background worker (with safe defaults)
         self.large_doc_manager = None
@@ -222,7 +219,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self._pending_analysis_params = None
         self._processing_thread = None
         self._processing_worker = None
-        self._ocr_reader = None
         self.online_models_gemini = []
 
         # Defer heavy initialization to background thread
@@ -231,8 +227,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self._init_worker.moveToThread(self._init_thread)
         self._init_thread.started.connect(self._init_worker.run)
         self._init_worker.progress.connect(self._on_init_progress)
-        self._init_worker.offline_progress.connect(self._on_offline_progress)
-        self._init_worker.offline_state_ready.connect(self._on_offline_state_ready)
         self._init_worker.finished.connect(self._on_init_finished)
         self._init_worker.finished.connect(self._init_thread.quit)
         self._init_worker.finished.connect(self._init_worker.deleteLater)
@@ -447,6 +441,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         def _cancel_thread(thread, worker):
             if thread and thread.isRunning():
                 thread.requestInterruption()
+                thread.quit()
                 if worker:
                     try:
                         worker.finished.disconnect()
@@ -591,26 +586,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         except Exception:
             return os.getcwd()
 
-    def _load_offline_state(self) -> dict:
-        path = getattr(self, "offline_state_path", "")
-        if path and os.path.exists(path):
-            try:
-                with open(path, "r", encoding="utf-8") as fh:
-                    data = json.load(fh)
-                if isinstance(data, dict):
-                    return data
-            except Exception:
-                pass
-        return {}
-
-    def _apply_offline_state_to_settings(self) -> None:
-        state = getattr(self, "_offline_state", {}) or {}
-        try:
-            if hasattr(self, "settings_window") and hasattr(self.settings_window, "apply_offline_state"):
-                self.settings_window.apply_offline_state(state)
-        except Exception:
-            pass
-
     def copy_summary_to_clipboard(self):
         text = self.ui.summaryTextEdit.toPlainText() if hasattr(self.ui, 'summaryTextEdit') else ""
         if not text:
@@ -720,6 +695,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 return
 
         provider = ""
+        gemini_key = self._get_gemini_key()
         model = self.ui.availableModelCombo.currentText() if hasattr(self.ui, 'availableModelCombo') else ""
         if source.startswith("Offline"):
             provider = "ollama"
@@ -742,12 +718,11 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             if not model or model.startswith("Missing"):
                 QMessageBox.information(self, "Gemini", "Please select a valid Gemini model.")
                 return
-            key = self._get_gemini_key()
-            if not key:
+            if not gemini_key:
                 QMessageBox.warning(self, "Gemini", "Missing GOOGLE_API_KEY. Add it in Settings.")
                 return
             if genai is None:
-                QMessageBox.warning(self, "Gemini", "Google Generative AI SDK not installed. Please install 'google-generativeai'.")
+                QMessageBox.warning(self, "Gemini", "Google Gen AI SDK not installed. Please install 'google-genai'.")
                 return
             self._set_status(f"Online - Gemini {model} ...")
         else:
@@ -756,21 +731,25 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
 
         # NOTE: Any heavy operations (like file text extraction) are handled in the worker thread now
 
-        # Prepare params for background execution
+        # Prepare params for background execution using the key captured on the UI thread.
         params = {
             "provider": provider,
             "model": model,
             "is_image": is_image,
             "file_path": file_path,
             "input_text": input_text,
-            "gemini_key": self._get_gemini_key() if provider == "gemini" else "",
+            "gemini_key": gemini_key,
         }
 
         doc_key = ""
         # Compute doc_key for images/documents or pasted text
         if file_path:
             try:
-                doc_key = self.large_doc_manager.compute_document_key(file_path)
+                processing_version = GEMINI_OCR_PIPELINE_VERSION if is_image else None
+                doc_key = self.large_doc_manager.compute_document_key(
+                    file_path,
+                    processing_version=processing_version,
+                )
             except Exception:
                 doc_key = ""
             params["doc_key"] = doc_key
@@ -786,25 +765,34 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         if (file_path or input_text) and doc_key:
             has_store = bool(self.large_doc_manager.has_vector_store(doc_key))
             if not has_store:
-                if not self._get_gemini_key():
-                    QMessageBox.warning(
-                        self,
-                        "Gemini Embedding",
-                        "A Gemini API key is required to index documents. Add it in Settings and try again.",
-                    )
+                if not gemini_key:
+                    if is_image:
+                        title, message = self._gemini_ocr_message("missing_key")
+                    else:
+                        title = "Gemini Embedding"
+                        message = (
+                            "A Gemini API key is required to index documents. "
+                            "Add it in Settings and try again."
+                            if self._current_lang != "ar"
+                            else "يلزم مفتاح Gemini API لفهرسة المستندات. أضِفه في الإعدادات ثم حاول مرة أخرى."
+                        )
+                    QMessageBox.warning(self, title, message)
                     return
                 self._current_doc_key = doc_key
                 self._pending_analysis_params = params
                 if file_path:
-                    self._set_status("Processing with OCR..." if is_image else "Processing document...")
+                    self._set_status("Extracting image text with Gemini..." if is_image else "Processing document...")
                     self._set_loading(True)
-                    print(f"Starting {'image OCR' if is_image else 'document'} processing worker")
-                    self._start_large_doc_processing(file_path, doc_key, is_image=is_image)
+                    self._start_large_doc_processing(
+                        file_path,
+                        doc_key,
+                        gemini_key,
+                        is_image=is_image,
+                    )
                 else:
                     self._set_status("Processing pasted text...")
                     self._set_loading(True)
-                    print("Starting pasted text processing worker")
-                    self._start_pasted_text_processing(doc_key, input_text)
+                    self._start_pasted_text_processing(doc_key, input_text, gemini_key)
                 return
             # Already processed; use existing vector store
             self._qa_vector_doc_key = doc_key
@@ -937,10 +925,13 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             elif provider == "gemini":
                 if not genai or not gemini_key:
                     return "OTHER"
-                genai.configure(api_key=gemini_key)
-                m = genai.GenerativeModel(model_name=model)
-                resp = m.generate_content([classification_prompt])
-                response = getattr(resp, 'text', '').strip().upper()
+                response = (
+                    self._generate_gemini_text(
+                        classification_prompt,
+                        gemini_key,
+                    )
+                    or ""
+                ).strip().upper()
             else:
                 return "OTHER"
             
@@ -1195,31 +1186,57 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             # Fallback for Python versions without 'usedforsecurity'
             return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
-    def _start_pasted_text_processing(self, doc_key: str, text: str):
+    def _start_pasted_text_processing(self, doc_key: str, text: str, gemini_key: str):
         """Start background processing for pasted text with RAG chunking."""
         self._processing_thread = QThread(self)
-        self._processing_worker = PastedTextProcessWorker(self, doc_key, text, self._session_id)
-        self._processing_worker.moveToThread(self._processing_thread)
-        self._processing_thread.started.connect(self._processing_worker.run)
-        self._processing_worker.finished.connect(self._on_large_doc_processing_finished)
-        self._processing_worker.error.connect(self._on_large_doc_processing_error)
-        self._processing_worker.finished.connect(self._processing_thread.quit)
-        self._processing_worker.finished.connect(self._processing_worker.deleteLater)
-        self._processing_thread.finished.connect(self._processing_thread.deleteLater)
-        self._processing_thread.start()
+        self._processing_worker = PastedTextProcessWorker(
+            self,
+            doc_key,
+            text,
+            gemini_key,
+            self._session_id,
+        )
+        self._start_processing_worker()
 
-    def _start_large_doc_processing(self, file_path: str, doc_key: str, is_image: bool = False):
-        """Start background processing for large documents or images with OCR."""
+    def _start_large_doc_processing(
+        self,
+        file_path: str,
+        doc_key: str,
+        gemini_key: str,
+        is_image: bool = False,
+    ):
+        """Start background processing for documents or images."""
         self._processing_thread = QThread(self)
-        self._processing_worker = LargeDocProcessWorker(self, file_path, doc_key, self._session_id, is_image=is_image)
-        self._processing_worker.moveToThread(self._processing_thread)
-        self._processing_thread.started.connect(self._processing_worker.run)
-        self._processing_worker.finished.connect(self._on_large_doc_processing_finished)
-        self._processing_worker.error.connect(self._on_large_doc_processing_error)
-        self._processing_worker.finished.connect(self._processing_thread.quit)
-        self._processing_worker.finished.connect(self._processing_worker.deleteLater)
-        self._processing_thread.finished.connect(self._processing_thread.deleteLater)
-        self._processing_thread.start()
+        self._processing_worker = LargeDocProcessWorker(
+            self,
+            file_path,
+            doc_key,
+            gemini_key,
+            self._session_id,
+            is_image=is_image,
+        )
+        self._start_processing_worker()
+
+    def _start_processing_worker(self) -> None:
+        thread = self._processing_thread
+        worker = self._processing_worker
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.finished.connect(self._on_large_doc_processing_finished)
+        worker.error.connect(self._on_large_doc_processing_error)
+        worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
+        worker.finished.connect(worker.deleteLater)
+        worker.error.connect(worker.deleteLater)
+        thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_processing_worker_refs)
+        thread.start()
+
+    @pyqtSlot()
+    def _clear_processing_worker_refs(self) -> None:
+        if self.sender() is self._processing_thread:
+            self._processing_worker = None
+            self._processing_thread = None
 
     @pyqtSlot(str, int, int)
     def _on_large_doc_processing_finished(self, doc_key: str, chunk_count: int, session_id: int):
@@ -1234,22 +1251,69 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             f"Document split into {chunk_count} chunks and stored in database.\n\nGenerating report..."
         )
         self._set_status(message)
-        # Now proceed with analysis using the vector context
-        if self._pending_analysis_params:
-            self._pending_analysis_params["doc_key"] = doc_key
+        # Now proceed with analysis using the vector context.
+        params = self._pending_analysis_params
+        self._pending_analysis_params = None
+        if params:
+            params["doc_key"] = doc_key
             self._qa_vector_doc_key = doc_key
-            self._start_background_analysis(self._pending_analysis_params)
-            self._pending_analysis_params = None
+            self._start_background_analysis(params)
 
     @pyqtSlot(str, int)
-    def _on_large_doc_processing_error(self, error_message: str, session_id: int):
+    def _on_large_doc_processing_error(self, error_reason: str, session_id: int):
         if session_id != self._session_id:
             return
-        """Handle large document processing error."""
+        """Handle document or image processing errors."""
         self._set_loading(False)
+        params = self._pending_analysis_params or {}
         self._pending_analysis_params = None
-        QMessageBox.critical(self, "Processing Error", f"Failed to process large document:\n{error_message}")
+        if params.get("is_image") and error_reason.startswith("gemini_ocr:"):
+            reason = error_reason.split(":", 1)[1]
+            title, message = self._gemini_ocr_message(reason)
+        else:
+            is_ar = getattr(self, "_current_lang", "en") == "ar"
+            title = "خطأ في المعالجة" if is_ar else "Processing Error"
+            message = (
+                f"تعذرت معالجة المستند:\n{error_reason}"
+                if is_ar
+                else f"Failed to process document:\n{error_reason}"
+            )
+        QMessageBox.critical(self, title, message)
         self._set_status("Ready")
+
+    def _gemini_ocr_message(self, reason: str) -> tuple[str, str]:
+        is_ar = getattr(self, "_current_lang", "en") == "ar"
+        if is_ar:
+            title = "تعذر استخراج نص الصورة"
+            messages = {
+                "missing_key": "يلزم مفتاح Gemini API لمعالجة الصور. افتح الإعدادات وأضف المفتاح ثم حاول مرة أخرى.",
+                "sdk_missing": "حزمة Google Gen AI غير متاحة. ثبّت حزمة google-genai ثم أعد تشغيل التطبيق.",
+                "invalid_image": "الصورة غير مدعومة أو فارغة أو تالفة أو لا يمكن قراءتها. اختر ملف PNG أو JPG صالحاً.",
+                "auth": "رفض Gemini مفتاح API. تحقق من المفتاح المحفوظ في الإعدادات.",
+                "quota": "تم بلوغ حصة Gemini أو حد الطلبات. انتظر حتى تتجدد الحصة أو تحقق من الفوترة.",
+                "network": "تعذر الاتصال بـ Gemini. تحقق من اتصال الإنترنت ثم حاول مرة أخرى.",
+                "timeout": "انتهت مهلة طلب استخراج النص من الصورة. تحقق من اتصال الإنترنت ثم حاول مرة أخرى.",
+                "service": "خدمة Gemini غير متاحة مؤقتاً. حاول مرة أخرى بعد قليل.",
+                "model_unavailable": "لا يتوفر أي نموذج من نماذج Gemini الاحتياطية لهذا المفتاح أو الحساب. تحقق من إتاحة Gemini 2.5 و3.1 و3.5 Flash-Lite.",
+                "blocked": "حظرت ضوابط أمان Gemini استجابة الصورة. جرّب صورة مختلفة.",
+                "no_text": "لم يتم العثور على نص مقروء في الصورة. اختر صورة أوضح تحتوي على نص.",
+            }
+        else:
+            title = "Image Text Extraction Failed"
+            messages = {
+                "missing_key": "Gemini image OCR requires an API key. Open Settings, add the Gemini API key, and try again.",
+                "sdk_missing": "The Google Gen AI SDK is unavailable. Install the 'google-genai' package and restart the application.",
+                "invalid_image": "The image is unsupported, empty, damaged, or unreadable. Choose a valid PNG or JPG image.",
+                "auth": "Gemini rejected the API key. Check the key saved in Settings.",
+                "quota": "The Gemini quota or rate limit was reached. Wait for the quota to reset or check billing.",
+                "network": "Gemini could not be reached. Check the internet connection and try again.",
+                "timeout": "The image text extraction request timed out. Check the internet connection and try again.",
+                "service": "The Gemini service is temporarily unavailable. Try again shortly.",
+                "model_unavailable": "No configured Gemini fallback model is available for this API key or account. Check access to Gemini 2.5, 3.1, and 3.5 Flash-Lite.",
+                "blocked": "Gemini safety controls blocked the image response. Try a different image.",
+                "no_text": "No readable text was found in the image. Choose a clearer image that contains text.",
+            }
+        return title, messages.get(reason, messages["service"])
 
     def _send_question(self):
         question = self.ui.questionLineEdit.text().strip()
@@ -1298,11 +1362,20 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         worker.finished.connect(self._on_qa_finished)
         worker.error.connect(self._on_qa_error)
         worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
+        worker.error.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
+        thread.finished.connect(self._clear_qa_worker_refs)
         self._qa_thread = thread
         self._qa_worker = worker
         thread.start()
+
+    @pyqtSlot()
+    def _clear_qa_worker_refs(self) -> None:
+        if self.sender() is self._qa_thread:
+            self._qa_thread = None
+            self._qa_worker = None
 
     @pyqtSlot(str, int)
     def _on_qa_finished(self, answer_text: str, session_id: int):
@@ -1350,6 +1423,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         is_ar = (lang == "ar")
         try:
             self._current_lang = 'ar' if is_ar else 'en'
+            self.settings_window.apply_language(self._current_lang)
             self.setWindowTitle("محلل المستندات الذكي" if is_ar else "AI Document Analyzer")
             self.ui.newChatButton.setText("＋ تحليل جديد" if is_ar else "＋ New Analysis")
             self.ui.availableModelLabel.setText("النموذج:" if is_ar else "Model:")
@@ -1413,12 +1487,21 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         worker.finished.connect(self._on_analysis_finished)
         worker.error.connect(self._on_analysis_error)
         worker.finished.connect(thread.quit)
+        worker.error.connect(thread.quit)
         worker.finished.connect(worker.deleteLater)
+        worker.error.connect(worker.deleteLater)
         thread.finished.connect(thread.deleteLater)
         # Keep refs to prevent GC
         self._analysis_thread = thread
         self._analysis_worker = worker
+        thread.finished.connect(self._clear_analysis_worker_refs)
         thread.start()
+
+    @pyqtSlot()
+    def _clear_analysis_worker_refs(self) -> None:
+        if self.sender() is self._analysis_thread:
+            self._analysis_thread = None
+            self._analysis_worker = None
 
     @pyqtSlot(str, str, str, str, str, str, int)
     def _on_analysis_finished(self, summary_text: str, status_text: str, notify_title: str, notify_message: str, effective_text: str, doc_key: str, session_id: int):
@@ -1474,10 +1557,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 pass
             return
         self._settings_open = True
-        try:
-            self.settings_window.apply_offline_state(self._offline_state)
-        except Exception:
-            pass
         self._set_settings_buttons_enabled(False)
         self.settings_window.show()
         self.settings_window.finished.connect(self.on_settings_closed)
@@ -1496,27 +1575,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 self.ui.topSettingsButton.setEnabled(enabled)
         except Exception:
             pass
-
-    @pyqtSlot(float, str)
-    def _on_offline_progress(self, percent: float, message: str):
-        try:
-            self.settings_window.apply_offline_progress(percent, message)
-        except Exception:
-            pass
-        if isinstance(self._offline_state, dict):
-            self._offline_state["progress"] = percent
-
-    @pyqtSlot(dict)
-    def _on_offline_state_ready(self, state: dict):
-        if not isinstance(state, dict):
-            state = {}
-        self._offline_state = state
-        try:
-            self.settings_window.apply_offline_state(self._offline_state)
-        except Exception:
-            pass
-        if self._offline_state.get("offline_ready"):
-            self._set_status("READY for Offline use")
 
     def export_pdf(self):
         text = self.ui.summaryTextEdit.toPlainText() if hasattr(self.ui, 'summaryTextEdit') else ""
@@ -1810,7 +1868,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             "Ollama server is not running": "خادم Ollama غير قيد التشغيل",
             "No models installed": "لا توجد نماذج مثبتة",
             "Failed to refresh models": "فشل في تحديث النماذج",
-            "Processing with OCR...": "جارٍ المعالجة عبر OCR...",
+            "Extracting image text with Gemini...": "جارٍ استخراج نص الصورة باستخدام Gemini...",
             "Processing document...": "جارٍ معالجة المستند...",
             "Processing pasted text...": "جارٍ معالجة النص الملصق...",
             "Summary copied to clipboard": "تم نسخ الملخص إلى الحافظة",
@@ -1895,23 +1953,14 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         _, ext = os.path.splitext(file_path)
         return (ext or "").lower() in {".png", ".jpg", ".jpeg"}
 
-    def _read_image_base64_and_mime(self, file_path: str) -> tuple[str, str]:
-        mime, _ = mimetypes.guess_type(file_path)
-        if not mime:
-            # Default to png if unknown
-            mime = "image/png"
-        with open(file_path, "rb") as f:
-            b64 = base64.b64encode(f.read()).decode("utf-8")
-        return b64, mime
-
-    def extract_text_from_file(self, file_path: str) -> str:
+    def extract_text_from_file(self, file_path: str, gemini_key: str = "") -> str:
         """Extract text from PDF, DOCX, TXT, or image files. Raises on unsupported types."""
         _, ext = os.path.splitext(file_path)
         ext = (ext or "").lower()
         
-        # Handle images with OCR
+        # Images are transcribed by Gemini before entering the normal text pipeline.
         if ext in {".png", ".jpg", ".jpeg"}:
-            return self.extract_text_from_image_ocr(file_path)
+            return self.extract_text_from_image_ocr(file_path, gemini_key)
         
         if ext == ".pdf":
             if PdfReader is None:
@@ -1937,88 +1986,9 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             raise RuntimeError(".doc files are not supported. Please convert to .docx or PDF.")
         raise RuntimeError(f"Unsupported file type: {ext}")
     
-    def extract_text_from_image_ocr(self, file_path: str) -> str:
-        """Extract text from image using EasyOCR."""
-        # Ensure dependencies are available at call time
-        try:
-            import easyocr  # type: ignore
-        except Exception as import_err:
-            raise RuntimeError(f"EasyOCR not installed or failed to load: {import_err}")
-        try:
-            from PIL import Image  # type: ignore
-        except Exception:
-            raise RuntimeError("Pillow not installed. Please install 'Pillow'.")
-
-        # Lazy-load OCR reader (expensive initialization)
-        if self._ocr_reader is None:
-            try:
-                # Initialize with English and Arabic support, GPU disabled for frozen apps
-                gpu = False
-                if not getattr(sys, 'frozen', False):
-                    # Only try GPU in non-frozen environment
-                    try:
-                        import torch  # type: ignore
-                        try:
-                            gpu = bool(torch.cuda.is_available())
-                        except Exception:
-                            gpu = False
-                    except Exception:
-                        gpu = False
-                # Force EasyOCR to use app-local models cache prepared by offline_bootstrap
-                try:
-                    models_dir = getattr(self.large_doc_manager, 'models_dir', None)
-                    if not models_dir:
-                        models_dir = os.path.join(self._appdata_config_dir(), 'models')
-                except Exception:
-                    models_dir = os.path.join(os.getcwd(), 'models')
-                easyocr_dir = os.path.join(models_dir, 'easyocr')
-                try:
-                    os.makedirs(easyocr_dir, exist_ok=True)
-                except Exception:
-                    pass
-                # Allow download if models not present (first run scenario)
-                # Check if models already exist
-                models_exist = any(
-                    f.endswith('.pth') or f.endswith('.bin')
-                    for f in os.listdir(easyocr_dir)
-                ) if os.path.isdir(easyocr_dir) else False
-                self._ocr_reader = easyocr.Reader(
-                    ['en', 'ar'],
-                    gpu=gpu,
-                    model_storage_directory=easyocr_dir,
-                    download_enabled=not models_exist,  # Download only if models missing
-                )
-            except Exception as e:
-                raise RuntimeError(f"Failed to initialize EasyOCR reader: {e}")
-        
-        try:
-            # Read image
-            img = Image.open(file_path)
-            # Convert to RGB if needed
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
-            
-            # Perform OCR
-            results = self._ocr_reader.readtext(file_path)
-            
-            # Extract text from results
-            # EasyOCR returns list of (bbox, text, confidence)
-            extracted_lines = []
-            for detection in results:
-                if len(detection) >= 2:
-                    text = detection[1]
-                    if text and text.strip():
-                        extracted_lines.append(text.strip())
-            
-            full_text = "\n".join(extracted_lines)
-            if not full_text.strip():
-                raise RuntimeError("No text detected in the image. The image may be blank or contain no readable text.")
-            
-            return full_text
-        except Exception as e:
-            if "No text detected" in str(e):
-                raise
-            raise RuntimeError(f"OCR extraction failed: {e}")
+    def extract_text_from_image_ocr(self, file_path: str, gemini_key: str) -> str:
+        """Extract image text with the fixed Gemini OCR pipeline."""
+        return extract_text_from_image(file_path, gemini_key)
 
     # --- Summarization Helpers ---
     def summarize_text_offline(self, model: str, input_text: str) -> str:
@@ -2064,8 +2034,38 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             pass
         return str(result)
 
-    def summarize_text_gemini(self, model: str, input_text: str, api_key: str) -> Optional[str]:
-        genai.configure(api_key=api_key)  # type: ignore
+    def _generate_gemini_text(
+        self,
+        prompt: str,
+        api_key: str,
+        system_instruction: Optional[str] = None,
+    ) -> Optional[str]:
+        if genai is None or genai_types is None:
+            raise RuntimeError("The Google Gen AI SDK is unavailable. Install 'google-genai'.")
+
+        client = genai.Client(
+            api_key=api_key,
+            http_options=genai_types.HttpOptions(timeout=GEMINI_GENERATION_TIMEOUT_MS),
+        )
+        try:
+            config = genai_types.GenerateContentConfig(
+                system_instruction=system_instruction,
+            )
+            response, _used_model = call_with_model_fallback(
+                lambda fallback_model: client.models.generate_content(
+                    model=fallback_model,
+                    contents=prompt,
+                    config=config,
+                )
+            )
+            return getattr(response, "text", None)
+        finally:
+            try:
+                client.close()
+            except Exception:
+                pass
+
+    def summarize_text_gemini(self, _model: str, input_text: str, api_key: str) -> Optional[str]:
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         if is_ar:
             sys_instr = (
@@ -2091,9 +2091,11 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 '{\n  "summary": {\n    "key_points": ["...", "..."],\n    "methods": ["...", "..."],\n    "conclusions": ["...", "..."]\n  }\n}\n\n' +
                 "Return only valid JSON without code fences. Write the content in English."
             )
-        m = genai.GenerativeModel(model_name=model, system_instruction=sys_instr)  # type: ignore
-        resp = m.generate_content([user_prompt])
-        return getattr(resp, 'text', None)
+        return self._generate_gemini_text(
+            user_prompt,
+            api_key,
+            system_instruction=sys_instr,
+        )
 
     # --- JSON parsing and formatting helpers ---
     def _try_parse_summary_json(self, text: str):
@@ -2342,7 +2344,15 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         except Exception:
             return body_inner_html
     # --- Q&A Helpers ---
-    def answer_question_offline(self, model: str, messages, summary: str, input_text: str, doc_key: str = "") -> str:
+    def answer_question_offline(
+        self,
+        model: str,
+        messages,
+        summary: str,
+        input_text: str,
+        doc_key: str = "",
+        gemini_key: str = "",
+    ) -> str:
         # Build system + user prompts with robust instructions for safety flags, counts, and dialogue
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         if is_ar:
@@ -2367,7 +2377,11 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         vector_context = ""
         if doc_key:
             try:
-                docs = self.large_doc_manager.retrieve_context(doc_key, user_question or "")
+                docs = self.large_doc_manager.retrieve_context(
+                    doc_key,
+                    user_question or "",
+                    api_key=gemini_key,
+                )
             except Exception as exc:
                 raise RuntimeError(str(exc)) from exc
             if docs:
@@ -2425,8 +2439,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             pass
         return str(result)
 
-    def answer_question_gemini(self, model: str, messages, summary: str, input_text: str, api_key: str, doc_key: str = "") -> Optional[str]:
-        genai.configure(api_key=api_key)  # type: ignore
+    def answer_question_gemini(self, _model: str, messages, summary: str, input_text: str, api_key: str, doc_key: str = "") -> Optional[str]:
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         if is_ar:
             system_prompt = (
@@ -2440,7 +2453,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 "Handle all types of questions such as: \"Does the document include any form of violence?\", \"How many times was the word repeated?\", \"What is the conversation about between character A and character B?\", \"Does the document include offensive ideas or words against the law or the country?\", and \"Does it contain words targeting a tribe?\" "
                 "Remember the previous conversation with the user and use it for context."
             )
-        m = genai.GenerativeModel(model_name=model, system_instruction=system_prompt)  # type: ignore
         # Strictly use original document text only (no summary fallback)
         document_text = (input_text or "").strip()
         user_question = ""
@@ -2451,7 +2463,11 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         vector_context = ""
         if doc_key:
             try:
-                docs = self.large_doc_manager.retrieve_context(doc_key, user_question or "")
+                docs = self.large_doc_manager.retrieve_context(
+                    doc_key,
+                    user_question or "",
+                    api_key=api_key,
+                )
             except Exception as exc:
                 raise RuntimeError(str(exc)) from exc
             if docs:
@@ -2496,8 +2512,11 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 "Current User Question:\n" + user_question + "\n\n" +
                 "Answer strictly based on the document text and previous conversation only."
             )
-        resp = m.generate_content([user_prompt])
-        return getattr(resp, 'text', None)
+        return self._generate_gemini_text(
+            user_prompt,
+            api_key,
+            system_instruction=system_prompt,
+        )
 
     def _read_config(self):
         try:
@@ -2751,7 +2770,7 @@ class _AnalysisWorker(QObject):
                     if not os.path.exists(file_path):
                         self.error.emit("", f"File does not exist:\n{file_path}", self.session_id)
                         return
-                    extracted = self.window.extract_text_from_file(file_path)
+                    extracted = self.window.extract_text_from_file(file_path, gemini_key)
                     if not extracted:
                         self.error.emit("", "Could not extract text from the selected file.", self.session_id)
                         return
@@ -2769,7 +2788,7 @@ class _AnalysisWorker(QObject):
             except Exception:
                 effective_text = ""
 
-            # For both ollama and gemini, use OCR text instead of vision models
+            # Both providers summarize the same extracted document text.
             if provider == "ollama":
                 summary = self.window.summarize_text_offline(model, input_text)
                 self.finished.emit(summary or "(No response)", "Offline - Done", "Analysis Complete", "Your offline analysis has finished.", effective_text, doc_key_out, self.session_id)
@@ -2838,7 +2857,14 @@ class _QAWorker(QObject):
                 return
 
             if provider == "ollama":
-                answer = self.window.answer_question_offline(model, messages, summary, input_text, doc_key)
+                answer = self.window.answer_question_offline(
+                    model,
+                    messages,
+                    summary,
+                    input_text,
+                    doc_key,
+                    gemini_key,
+                )
                 self.finished.emit(answer or "", self.session_id)
                 return
             if provider == "gemini":
@@ -2855,66 +2881,73 @@ class LargeDocProcessWorker(QObject):
     finished = pyqtSignal(str, int, int)
     error = pyqtSignal(str, int)
 
-    def __init__(self, window: 'MainWindow', file_path: str, doc_key: str, session_id: int, is_image: bool = False):
+    def __init__(
+        self,
+        window: 'MainWindow',
+        file_path: str,
+        doc_key: str,
+        gemini_key: str,
+        session_id: int,
+        is_image: bool = False,
+    ):
         super().__init__()
         self.window = window
         self.file_path = file_path
         self.doc_key = doc_key
+        self.gemini_key = gemini_key
         self.session_id = session_id
         self.is_image = is_image
 
     @pyqtSlot()
     def run(self):
-        file_type = "image" if self.is_image else "document"
-        print(f"LargeDocProcessWorker.run started for {file_type}: {self.file_path}, doc_key: {self.doc_key}")
         try:
             if not os.path.exists(self.file_path):
                 self.error.emit(f"File does not exist:\n{self.file_path}", self.session_id)
                 return
             
-            if self.is_image:
-                print("Extracting text from image using OCR...")
-            else:
-                print("File exists, extracting text")
-            
-            text = self.window.extract_text_from_file(self.file_path)
-            print(f"Text extracted, length: {len(text)}")
+            text = self.window.extract_text_from_file(self.file_path, self.gemini_key)
             
             if not text or not text.strip():
                 if self.is_image:
-                    self.error.emit("OCR could not extract any text from the image. The image may be blank or contain no readable text.", self.session_id)
+                    self.error.emit("gemini_ocr:no_text", self.session_id)
                 else:
                     self.error.emit("Could not extract text from the file or file is empty.", self.session_id)
                 return
             
-            print(f"Calling prepare_document with {len(text)} characters")
             chunk_count = self.window.large_doc_manager.prepare_document(
                 self.doc_key,
                 self.file_path,
                 text,
+                api_key=self.gemini_key,
             )
-            print(f"prepare_document completed, chunks: {chunk_count}")
             self.finished.emit(self.doc_key, chunk_count, self.session_id)
+        except GeminiOcrError as exc:
+            self.error.emit(f"gemini_ocr:{exc.reason}", self.session_id)
         except Exception as e:
-            print(f"Exception in LargeDocProcessWorker: {e}")
-            error_msg = f"OCR processing failed: {str(e)}" if self.is_image else f"Processing failed: {str(e)}"
-            self.error.emit(error_msg, self.session_id)
+            self.error.emit(f"Processing failed: {str(e)}", self.session_id)
 
 
 class PastedTextProcessWorker(QObject):
     finished = pyqtSignal(str, int, int)
     error = pyqtSignal(str, int)
 
-    def __init__(self, window: 'MainWindow', doc_key: str, text: str, session_id: int):
+    def __init__(
+        self,
+        window: 'MainWindow',
+        doc_key: str,
+        text: str,
+        gemini_key: str,
+        session_id: int,
+    ):
         super().__init__()
         self.window = window
         self.doc_key = doc_key
         self.text = text
+        self.gemini_key = gemini_key
         self.session_id = session_id
 
     @pyqtSlot()
     def run(self):
-        print(f"PastedTextProcessWorker.run started for doc_key: {self.doc_key}")
         try:
             clean_text = (self.text or "").strip()
             if not clean_text:
@@ -2926,11 +2959,10 @@ class PastedTextProcessWorker(QObject):
                 self.doc_key,
                 source_label,
                 clean_text,
+                api_key=self.gemini_key,
             )
-            print(f"PastedTextProcessWorker completed, chunks: {chunk_count}")
             self.finished.emit(self.doc_key, chunk_count, self.session_id)
         except Exception as e:
-            print(f"Exception in PastedTextProcessWorker: {e}")
             self.error.emit(f"Processing failed: {str(e)}", self.session_id)
 
 

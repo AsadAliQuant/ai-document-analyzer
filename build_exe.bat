@@ -52,18 +52,26 @@ echo.
     --collect-all langchain_text_splitters ^
     --collect-all langchain_core ^
     --collect-all qdrant_client ^
-    --collect-all torch ^
-    --collect-all scipy ^
-    --collect-all sklearn ^
-    --collect-all easyocr ^
-    --collect-all google.generativeai ^
     --collect-all google.genai ^
     --hidden-import google.genai ^
+    --hidden-import gemini_fallback ^
     --hidden-import qdrant_client.local ^
     --hidden-import portalocker ^
     --collect-all keyring ^
     --hidden-import keyring ^
     --hidden-import keyring.backends ^
+    --exclude-module easyocr ^
+    --exclude-module sentence_transformers ^
+    --exclude-module transformers ^
+    --exclude-module tokenizers ^
+    --exclude-module safetensors ^
+    --exclude-module torch ^
+    --exclude-module torchvision ^
+    --exclude-module cv2 ^
+    --exclude-module skimage ^
+    --exclude-module scipy ^
+    --exclude-module sklearn ^
+    --exclude-module imageio ^
     main.py
 
 if %ERRORLEVEL% NEQ 0 (
