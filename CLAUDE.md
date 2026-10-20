@@ -54,7 +54,7 @@ clear_vector_store.bat
 ### Core Files
 - `main_window.py` (~130KB) — all UI handlers, document processing, AI dispatch, Q&A chat. Inherits from `LoadingOverlayMixin` (in `startup_helper.py`) and `QMainWindow`.
 - `ui_main_window.py` — PyQt6 UI definitions for the main window
-- `startup_helper.py` — `InitializationWorker` (QThread worker for heavy startup) + `LoadingOverlayMixin` (animated overlay mixin for QMainWindow)
+- `startup_helper.py` — lightweight `InitializationWorker` for startup state/model labels + `LoadingOverlayMixin` (animated overlay mixin for QMainWindow); Qdrant is initialized lazily on first RAG use
 - `lock_overlay.py` — Full-screen overlay shown when the app is locked
 - `login_overlay.py` / `login_dialog.py` — Login UI components
 
@@ -89,7 +89,7 @@ clear_vector_store.bat
 
 ### Threading Model
 UI always runs on the main thread. Background operations use the `QThread` + `QObject` worker pattern:
-- `InitializationWorker` (in `startup_helper.py`) initializes the document manager and model list
+- `InitializationWorker` (in `startup_helper.py`) initializes lightweight state/model labels only; `MainWindow._get_large_doc_manager()` imports and constructs Qdrant once on first document/RAG use
 - Image OCR, document indexing, analysis, and Q&A run in workers defined in `main_window.py`
 - Processing success and error signals both terminate and clean up their worker thread
 

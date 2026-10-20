@@ -27,9 +27,14 @@ class _Manager:
 class _Window:
     def __init__(self, extracted_text="Exact\nOCR text", extraction_error=None):
         self.large_doc_manager = _Manager()
+        self.manager_requests = 0
         self.extracted_text = extracted_text
         self.extraction_error = extraction_error
         self.extraction_calls = []
+
+    def _get_large_doc_manager(self):
+        self.manager_requests += 1
+        return self.large_doc_manager
 
     def extract_text_from_file(self, file_path, gemini_key=""):
         self.extraction_calls.append((file_path, gemini_key))
@@ -95,6 +100,7 @@ class DocumentProcessingWorkerTests(unittest.TestCase):
         worker.run()
 
         self.assertEqual(window.extraction_calls[0][1], "api-key")
+        self.assertEqual(window.manager_requests, 1)
         self.assertEqual(
             window.large_doc_manager.calls,
             [("image-key", window.extraction_calls[0][0], " First line\nSecond line ", "api-key")],
@@ -151,6 +157,7 @@ class DocumentProcessingWorkerTests(unittest.TestCase):
         worker.run()
 
         self.assertEqual(window.large_doc_manager.calls, [])
+        self.assertEqual(window.manager_requests, 0)
         self.assertEqual(worker.finished.calls, [])
         self.assertEqual(worker.error.calls, [("gemini_ocr:quota", 8)])
 
@@ -162,6 +169,7 @@ class DocumentProcessingWorkerTests(unittest.TestCase):
 
         worker.run()
 
+        self.assertEqual(window.manager_requests, 1)
         self.assertEqual(
             window.large_doc_manager.calls,
             [("paste-key", "pasted:paste-key", "pasted text", "api-key")],

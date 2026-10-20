@@ -89,11 +89,14 @@ Build from a clean Python 3.11 environment. Do not reuse an environment merely b
 
 ## Latest local measurements
 
-Measured on Windows 10 on October 16, 2026 from the existing `.venv311` environment:
+Measured on Windows 10 on October 20, 2026 from the existing `.venv311` environment:
 
-- Latest one-folder package after consolidating all Gemini generation on `google-genai`: 217.41 MiB across 1,576 files, with 7.79-second first-run input-idle startup.
-- Earlier single-file measurement before the SDK consolidation: 105.48 MiB, with 10.91 seconds on the first run and 5.70/6.51 seconds on subsequent runs. Rebuild before relying on this single-file figure.
-- Package inspection found no deprecated `google-generativeai` SDK, EasyOCR, Torch, torchvision, OpenCV, scikit-image, SciPy, scikit-learn, ImageIO, or `offline_bootstrap` payloads. The file `langchain_text_splitters/sentence_transformers.py` is a LangChain helper name, not the removed `sentence-transformers` package.
+- Current canonical one-folder package: 217.41 MiB (`227,968,502` bytes) across 1,576 files and 252 directories. EXE SHA-256: `4ABB0562A605DF0A3E097BD60D579E447AE12F1658BC6B820501B77F6C89EFC5`.
+- Qdrant/NumPy are excluded from startup and initialized lazily on first document/RAG use.
+- Genuine first packaged launch after reboot: `WaitForInputIdle` 10.636 seconds and visible Ready 11.050 seconds. Visible Ready means the loading overlay is absent, the main window and Analyze control are enabled, and `Status: Ready` is visible.
+- Five accepted warm launches: `WaitForInputIdle` median 5.420 seconds and visible-Ready median 5.472 seconds. All five reached Ready and exited normally.
+- Package inspection found no EasyOCR, Hugging Face Transformers, sentence-transformers, Torch, torchvision, OpenCV, scikit-image, SciPy, scikit-learn, ImageIO, `offline_bootstrap`, or local model-weight payloads. Google Gen AI and LangChain modules containing `transformers` in their filenames are expected helper-name collisions.
+- Earlier single-file measurement before the SDK consolidation: 105.48 MiB, with 10.91 seconds on the first run and 5.70/6.51 seconds on subsequent runs. Rebuild before relying on this historical single-file figure.
 
 These are local development-machine measurements, not clean-account or end-user benchmarks. Repeat the acceptance checks on a clean Windows account before publishing performance claims.
 

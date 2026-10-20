@@ -22,10 +22,9 @@ class InitializationWorker(QObject):
             self.progress.emit("Initializing language")
             # Language will be applied by the main thread if needed
             
-            # Step 2: Initialize document manager (heavy - loads Qdrant)
-            self.progress.emit("Loading document manager")
-            from large_doc_manager import LargeDocumentManager
-            self.window.large_doc_manager = LargeDocumentManager(self.window.app_config_dir)
+            # Step 2: Leave Qdrant/NumPy out of the startup path. The document
+            # manager is initialized on first RAG use instead.
+            self.progress.emit("Preparing document features")
 
             # Step 3: Initialize state variables
             self.progress.emit("Initializing state")

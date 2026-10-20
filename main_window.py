@@ -22,6 +22,7 @@ import shutil
 import math
 import hashlib
 import sys
+import threading
 from ui_main_window import Ui_MainWindow
 from settings_window import SettingsWindow
 from typing import Optional, List
@@ -213,8 +214,10 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             pass
         self.config_path = os.path.join(self.app_config_dir, "config.json")
 
-        # Initialize attributes that will be set by background worker (with safe defaults)
+        # The document manager imports Qdrant/NumPy, so construct it only when
+        # a document workflow first needs RAG.
         self.large_doc_manager = None
+        self._large_doc_manager_lock = threading.Lock()
         self._qa_vector_doc_key = ""
         self._pending_analysis_params = None
         self._processing_thread = None
@@ -658,16 +661,25 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         except Exception:
             pass
 
+    def _get_large_doc_manager(self):
+        """Create and reuse the document manager on first RAG use."""
+        manager = getattr(self, "large_doc_manager", None)
+        if manager is not None:
+            return manager
+
+        lock = getattr(self, "_large_doc_manager_lock", None)
+        if lock is None:
+            raise RuntimeError("Document manager initialization lock is unavailable.")
+
+        with lock:
+            manager = getattr(self, "large_doc_manager", None)
+            if manager is None:
+                from large_doc_manager import LargeDocumentManager
+                manager = LargeDocumentManager(self.app_config_dir)
+                self.large_doc_manager = manager
+        return manager
+
     def analyze_document(self):
-        # Check if initialization completed successfully
-        if self.large_doc_manager is None:
-            QMessageBox.critical(
-                self,
-                "Initialization Error",
-                "The application failed to initialize properly. Please check the console for errors and restart the application."
-            )
-            return
-        
         source = self.ui.modelSourceCombo.currentText() if hasattr(self.ui, 'modelSourceCombo') else ""
         
         # Determine which tab is active to prioritize the correct input source
@@ -729,6 +741,16 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             QMessageBox.information(self, "Analysis", "Please select a valid source and model.")
             return
 
+        try:
+            document_manager = self._get_large_doc_manager()
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Document Features Unavailable",
+                f"The document manager could not be initialized:\n{exc}",
+            )
+            return
+
         # NOTE: Any heavy operations (like file text extraction) are handled in the worker thread now
 
         # Prepare params for background execution using the key captured on the UI thread.
@@ -746,7 +768,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         if file_path:
             try:
                 processing_version = GEMINI_OCR_PIPELINE_VERSION if is_image else None
-                doc_key = self.large_doc_manager.compute_document_key(
+                doc_key = document_manager.compute_document_key(
                     file_path,
                     processing_version=processing_version,
                 )
@@ -763,7 +785,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
 
         # Handle images, documents, and pasted text with RAG pipeline (always process into vector store)
         if (file_path or input_text) and doc_key:
-            has_store = bool(self.large_doc_manager.has_vector_store(doc_key))
+            has_store = bool(document_manager.has_vector_store(doc_key))
             if not has_store:
                 if not gemini_key:
                     if is_image:
@@ -887,130 +909,106 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             lines.append(f"{prefix}: {content}")
         return "\n".join(lines)
 
-    def _classify_question_type(self, question: str, provider: str, model: str, gemini_key: str = "") -> str:
-        """
-        Classify if a question is asking for counting word occurrences.
-        Returns "COUNT" for counting questions, "OTHER" for everything else.
-        """
+    def _classify_question_intent(self, question: str, provider: str, model: str, gemini_key: str = "") -> dict:
+        """Use the selected AI provider to classify Q&A intent and counting operands."""
+        default_intent = {"operation": "semantic_qa", "target": "", "unit": ""}
         if not question.strip():
-            return "OTHER"
-        
-        # Classification prompt
-        classification_prompt = (
-            "You are a classifier that determines if a question is asking to count word or phrase occurrences in a document.\n\n"
-            "Examples of COUNT questions:\n"
-            "- How many times does the word 'energy' appear?\n"
-            "- Count the occurrences of 'artificial intelligence'\n"
-            "- Number of times 'AI' is mentioned\n"
-            "- How often is 'machine learning' used?\n"
-            "- Count instances of the phrase 'data science'\n\n"
-            "Examples of OTHER questions:\n"
-            "- What is the main topic of this document?\n"
-            "- Summarize the key points\n"
-            "- What does the author think about AI?\n"
-            "- Explain the methodology used\n\n"
-            f"Question: \"{question}\"\n\n"
-            "Answer with only one word: COUNT or OTHER"
+            return default_intent
+
+        intent_prompt = (
+            "Classify the user's document question into exactly one operation.\n"
+            "- literal_occurrence_count: count an exact word or phrase. Put only that literal text in target.\n"
+            "- structural_count: count document units. Put one of lines, verses, paragraphs, sentences, words, or characters in unit.\n"
+            "- semantic_qa: every other question.\n\n"
+            "Do not classify a word merely because it contains the spelling of a structural unit. "
+            "For example, BASELINEQUARTZ, pipeline, headline, and outline are literal targets, not line-count requests.\n"
+            "Examples:\n"
+            "Question: How many times does the word BASELINEQUARTZ appear?\n"
+            '{"operation":"literal_occurrence_count","target":"BASELINEQUARTZ","unit":""}\n'
+            "Question: How many lines are in the document?\n"
+            '{"operation":"structural_count","target":"","unit":"lines"}\n'
+            "Question: Who owns the review?\n"
+            '{"operation":"semantic_qa","target":"","unit":""}\n\n'
+            f"Question: {question}\n"
+            "Return only the requested JSON object."
         )
-        
+        response_schema = {
+            "type": "object",
+            "properties": {
+                "operation": {
+                    "type": "string",
+                    "enum": ["literal_occurrence_count", "structural_count", "semantic_qa"],
+                },
+                "target": {"type": "string"},
+                "unit": {
+                    "type": "string",
+                    "enum": ["", "lines", "verses", "paragraphs", "sentences", "words", "characters"],
+                },
+            },
+            "required": ["operation", "target", "unit"],
+            "additionalProperties": False,
+        }
+
         try:
             if provider == "ollama":
                 if not ollama_client:
-                    return "OTHER"
-                result = ollama_client.generate(model=model, prompt=classification_prompt, stream=False)
+                    return default_intent
+                result = ollama_client.generate(model=model, prompt=intent_prompt, stream=False)
                 if isinstance(result, dict):
-                    response = result.get('response', '').strip().upper()
+                    response = result.get("response", "")
                 else:
-                    response = str(getattr(result, 'response', '')).strip().upper()
+                    response = str(getattr(result, "response", ""))
             elif provider == "gemini":
                 if not genai or not gemini_key:
-                    return "OTHER"
-                response = (
-                    self._generate_gemini_text(
-                        classification_prompt,
-                        gemini_key,
-                    )
-                    or ""
-                ).strip().upper()
+                    return default_intent
+                response = self._generate_gemini_text(
+                    intent_prompt,
+                    gemini_key,
+                    response_json_schema=response_schema,
+                ) or ""
             else:
-                return "OTHER"
-            
-            # Extract COUNT or OTHER from response
-            if "COUNT" in response:
-                return "COUNT"
-            else:
-                return "OTHER"
-                
+                return default_intent
+
+            return self._parse_question_intent(response)
         except Exception as e:
-            print(f"Classification error: {e}")
-            return "OTHER"
+            print(f"Question intent classification error: {e}")
+            return default_intent
 
-    def _extract_counting_target(self, question: str) -> str:
-        """
-        Extract the word or phrase to count from a counting question.
-        Uses simple heuristics to find quoted text or common patterns.
-        """
-        import re
-        
-        # Look for quoted text first
-        quoted_matches = re.findall(r'["\']([^"\']+)["\']', question)
-        if quoted_matches:
-            return quoted_matches[0]
-        
-        # Look for common patterns like "word X" or "phrase Y"
-        patterns = [
-            r'(?:word|term)\s+["\']?([^"\'?\s]+)["\']?',
-            r'(?:phrase)\s+["\']?([^"\'?]+)["\']?',
-            r'(?:occurrences? of)\s+["\']?([^"\'?]+)["\']?',
-            r'(?:times (?:does|is))\s+["\']?([^"\'?]+)["\']?',
-            r'(?:mentions? of)\s+["\']?([^"\'?]+)["\']?'
-        ]
-        
-        for pattern in patterns:
-            matches = re.findall(pattern, question, re.IGNORECASE)
-            if matches:
-                return matches[0].strip()
-        
-        # Fallback: look for the next meaningful word (skip filler/stop words)
-        words = question.split()
-        for i, word in enumerate(words):
-            if word.lower() in ['how', 'many', 'times', 'count', 'occurrences', 'mentions']:
-                # Look for the next meaningful word
-                for j in range(i+1, min(i+4, len(words))):
-                    candidate = words[j].strip('.,!?"\'()[]{}')
-                    stop = {
-                        'the','is','are','does','do','did','appear','appears','appeared','mentioned','mention',
-                        'many','much','number','of','in','on','at','to','from','a','an','this','that','these','those',
-                        'document','file','text','words','word','lines','line','verses','verse','poetry','sentences','sentence',
-                    }
-                    if len(candidate) > 2 and candidate.lower() not in stop:
-                        return candidate
-        
-        return ""
+    def _parse_question_intent(self, response: str) -> dict:
+        """Validate a structured question-intent response, failing safely to semantic Q&A."""
+        default_intent = {"operation": "semantic_qa", "target": "", "unit": ""}
+        if not response:
+            return default_intent
 
-    def _detect_structural_count(self, question: str) -> str:
-        """
-        Detect if the question asks to count structural units like lines, verses, paragraphs,
-        sentences, words, or characters.
-        Returns one of: 'lines', 'verses', 'paragraphs', 'sentences', 'words', 'characters', or ''.
-        """
-        q = (question or "").lower()
-        # Normalize parentheses text
-        q = q.replace("(", " ").replace(")", " ")
-        # Preferred order (more specific first)
-        if "verses" in q or "verse" in q or "lines of poetry" in q:
-            return "verses"
-        if "lines" in q or "line" in q:
-            return "lines"
-        if "stanzas" in q or "stanza" in q or "paragraphs" in q or "paragraph" in q:
-            return "paragraphs"
-        if "sentences" in q or "sentence" in q:
-            return "sentences"
-        if "words" in q or "word count" in q or "number of words" in q:
-            return "words"
-        if "characters" in q or "letters" in q:
-            return "characters"
-        return ""
+        candidate = response.strip()
+        if candidate.startswith("```") and candidate.endswith("```"):
+            candidate = candidate[3:-3].strip()
+            if candidate.lower().startswith("json"):
+                candidate = candidate[4:].strip()
+
+        try:
+            intent = json.loads(candidate)
+        except Exception:
+            try:
+                extracted = self._extract_first_json_object(candidate)
+                intent = json.loads(extracted) if extracted else None
+            except Exception:
+                intent = None
+
+        if not isinstance(intent, dict):
+            return default_intent
+
+        operation = str(intent.get("operation", "")).strip()
+        target = str(intent.get("target", "")).strip()
+        unit = str(intent.get("unit", "")).strip().lower()
+
+        if operation == "literal_occurrence_count" and target:
+            return {"operation": operation, "target": target, "unit": ""}
+        if operation == "structural_count" and unit in {
+            "lines", "verses", "paragraphs", "sentences", "words", "characters"
+        }:
+            return {"operation": operation, "target": "", "unit": unit}
+        return default_intent
 
     def _count_word_occurrences(self, text: str, target: str, case_sensitive: bool = False) -> int:
         """
@@ -1019,104 +1017,76 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         """
         if not text or not target:
             return 0
-        
-        import re
-        
-        # Prepare text and target for comparison
+
         search_text = text if case_sensitive else text.lower()
         search_target = target if case_sensitive else target.lower()
-        
-        # If target is a single word, use word boundaries for exact matching
+
         if ' ' not in search_target.strip():
-            # Single word - use word boundaries
             pattern = r'\b' + re.escape(search_target) + r'\b'
             matches = re.findall(pattern, search_text)
             return len(matches)
-        else:
-            # Phrase - count overlapping occurrences
-            count = 0
-            start = 0
-            while True:
-                pos = search_text.find(search_target, start)
-                if pos == -1:
-                    break
-                count += 1
-                start = pos + 1
-            return count
 
-    def _handle_counting_question(self, question: str, doc_key: str = "") -> str:
-        """
-        Handle a counting question by extracting the target and counting occurrences.
-        """
-        # Get full document text first
+        count = 0
+        start = 0
+        while True:
+            pos = search_text.find(search_target, start)
+            if pos == -1:
+                break
+            count += 1
+            start = pos + 1
+        return count
+
+    def _handle_counting_intent(self, intent: dict, doc_key: str = "") -> str:
+        """Execute an AI-classified count deterministically against the full document."""
         full_text = ""
-        if doc_key and self.large_doc_manager.has_vector_store(doc_key):
+        if doc_key:
             try:
-                full_text = self.large_doc_manager.read_full_text(doc_key)
+                document_manager = self._get_large_doc_manager()
+                if document_manager.has_vector_store(doc_key):
+                    full_text = document_manager.read_full_text(doc_key)
             except Exception:
                 pass
         if not full_text and hasattr(self, '_qa_document_text'):
             full_text = self._qa_document_text or ""
+
+        is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         if not full_text:
-            is_ar = getattr(self, '_current_lang', 'en') == 'ar'
             return "لا يوجد نص مستند متاح للعد." if is_ar else "No document text available for counting."
 
-        # Structural counting (lines, verses, paragraphs, sentences, words, characters)
-        stype = self._detect_structural_count(question)
-        if stype:
-            import re
-            is_ar = getattr(self, '_current_lang', 'en') == 'ar'
-            result = 0
-            if stype in {"lines", "verses"}:
-                result = len([ln for ln in full_text.splitlines() if ln.strip()])
-                if is_ar:
-                    return (f"عدد الأبيات (أسطر الشعر) في المستند: {result}" if stype == "verses"
-                            else f"عدد الأسطر في المستند: {result}")
-                else:
-                    return (f"Number of verses (lines of poetry) in the document: {result}" if stype == "verses"
-                            else f"Number of lines in the document: {result}")
-            if stype == "paragraphs":
-                # Split on blank lines (one or more)
-                parts = [p for p in re.split(r"(?:\r?\n\s*){2,}", full_text) if p and p.strip()]
-                result = len(parts)
-                if is_ar:
-                    return f"عدد الفقرات في المستند: {result}"
-                else:
-                    return f"Number of paragraphs in the document: {result}"
-            if stype == "sentences":
-                parts = [s for s in re.split(r"[.!?]+", full_text) if s and s.strip()]
-                result = len(parts)
-                if is_ar:
-                    return f"عدد الجمل في المستند: {result}"
-                else:
-                    return f"Number of sentences in the document: {result}"
-            if stype == "words":
-                words = re.findall(r"\b\w+\b", full_text, flags=re.UNICODE)
-                result = len(words)
-                if is_ar:
-                    return f"عدد الكلمات في المستند: {result}"
-                else:
-                    return f"Number of words in the document: {result}"
-            if stype == "characters":
-                result = len(re.sub(r"\s+", "", full_text))
-                if is_ar:
-                    return f"عدد الأحرف (بدون مسافات) في المستند: {result}"
-                else:
-                    return f"Number of characters (non-whitespace) in the document: {result}"
-
-        # Otherwise, extract a literal word/phrase to count
-        target = self._extract_counting_target(question)
-        if not target:
-            is_ar = getattr(self, '_current_lang', 'en') == 'ar'
-            return "لم أتمكن من تحديد الكلمة أو العبارة المراد عدها من السؤال." if is_ar else "Could not identify the word or phrase to count from your question."
-
-        # Count occurrences of the target term/phrase
-        count = self._count_word_occurrences(full_text, target, case_sensitive=False)
-        is_ar = getattr(self, '_current_lang', 'en') == 'ar'
-        if is_ar:
-            return f"تم العثور على \"{target}\" {count} مرة في المستند."
-        else:
+        operation = intent.get("operation", "")
+        if operation == "literal_occurrence_count":
+            target = str(intent.get("target", "")).strip()
+            if not target:
+                return "لم أتمكن من تحديد الكلمة أو العبارة المراد عدها من السؤال." if is_ar else "Could not identify the word or phrase to count from your question."
+            count = self._count_word_occurrences(full_text, target, case_sensitive=False)
+            if is_ar:
+                return f"تم العثور على \"{target}\" {count} مرة في المستند."
             return f"The word/phrase \"{target}\" appears {count} times in the document."
+
+        unit = str(intent.get("unit", "")).strip().lower()
+        if operation != "structural_count":
+            return ""
+        if unit in {"lines", "verses"}:
+            result = len([line for line in full_text.splitlines() if line.strip()])
+            if is_ar:
+                return (f"عدد الأبيات (أسطر الشعر) في المستند: {result}" if unit == "verses"
+                        else f"عدد الأسطر في المستند: {result}")
+            return (f"Number of verses (lines of poetry) in the document: {result}" if unit == "verses"
+                    else f"Number of lines in the document: {result}")
+        if unit == "paragraphs":
+            result = len([part for part in re.split(r"(?:\r?\n\s*){2,}", full_text) if part.strip()])
+            return f"عدد الفقرات في المستند: {result}" if is_ar else f"Number of paragraphs in the document: {result}"
+        if unit == "sentences":
+            result = len([sentence for sentence in re.split(r"[.!?]+", full_text) if sentence.strip()])
+            return f"عدد الجمل في المستند: {result}" if is_ar else f"Number of sentences in the document: {result}"
+        if unit == "words":
+            result = len(re.findall(r"\b\w+\b", full_text, flags=re.UNICODE))
+            return f"عدد الكلمات في المستند: {result}" if is_ar else f"Number of words in the document: {result}"
+        if unit == "characters":
+            result = len(re.sub(r"\s+", "", full_text))
+            return (f"عدد الأحرف (بدون مسافات) في المستند: {result}" if is_ar
+                    else f"Number of characters (non-whitespace) in the document: {result}")
+        return ""
 
     def _set_qa_controls_enabled(self, enabled: bool):
         self.ui.sendQuestionButton.setEnabled(enabled)
@@ -2039,6 +2009,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         prompt: str,
         api_key: str,
         system_instruction: Optional[str] = None,
+        response_json_schema: Optional[dict] = None,
     ) -> Optional[str]:
         if genai is None or genai_types is None:
             raise RuntimeError("The Google Gen AI SDK is unavailable. Install 'google-genai'.")
@@ -2048,9 +2019,13 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             http_options=genai_types.HttpOptions(timeout=GEMINI_GENERATION_TIMEOUT_MS),
         )
         try:
-            config = genai_types.GenerateContentConfig(
-                system_instruction=system_instruction,
-            )
+            config_kwargs = {"system_instruction": system_instruction}
+            if response_json_schema is not None:
+                config_kwargs.update(
+                    response_mime_type="application/json",
+                    response_json_schema=response_json_schema,
+                )
+            config = genai_types.GenerateContentConfig(**config_kwargs)
             response, _used_model = call_with_model_fallback(
                 lambda fallback_model: client.models.generate_content(
                     model=fallback_model,
@@ -2377,7 +2352,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         vector_context = ""
         if doc_key:
             try:
-                docs = self.large_doc_manager.retrieve_context(
+                document_manager = self._get_large_doc_manager()
+                docs = document_manager.retrieve_context(
                     doc_key,
                     user_question or "",
                     api_key=gemini_key,
@@ -2463,7 +2439,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         vector_context = ""
         if doc_key:
             try:
-                docs = self.large_doc_manager.retrieve_context(
+                document_manager = self._get_large_doc_manager()
+                docs = document_manager.retrieve_context(
                     doc_key,
                     user_question or "",
                     api_key=api_key,
@@ -2728,6 +2705,17 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         if hasattr(self, 'lock_overlay') and self.lock_overlay.isVisible():
             self.lock_overlay.setGeometry(self.rect())
 
+def _document_manager_for(window):
+    """Resolve the lazy manager while preserving injected test/application doubles."""
+    getter = getattr(window, "_get_large_doc_manager", None)
+    if callable(getter):
+        return getter()
+    manager = getattr(window, "large_doc_manager", None)
+    if manager is None:
+        raise RuntimeError("Document manager is unavailable.")
+    return manager
+
+
 class _AnalysisWorker(QObject):
     finished = pyqtSignal(str, str, str, str, str, str, int)  # summary, status, notify_title, notify_message, effective_text, doc_key, session_id
     error = pyqtSignal(str, str, int)  # status, error_message, session_id
@@ -2750,21 +2738,24 @@ class _AnalysisWorker(QObject):
             doc_key = self.params.get("doc_key", "")
 
             # Move potentially heavy file text extraction to the worker thread
+            document_manager = None
             try:
-                if doc_key and self.window.large_doc_manager.has_vector_store(doc_key):
+                if doc_key:
+                    document_manager = _document_manager_for(self.window)
+                if doc_key and document_manager.has_vector_store(doc_key):
                     # Prefer full raw text for offline; cap for online
                     if provider == "ollama":
-                        full_text = self.window.large_doc_manager.read_full_text(doc_key)
+                        full_text = document_manager.read_full_text(doc_key)
                         if full_text and full_text.strip():
                             cap = self.window._get_offline_summary_char_cap()
                             input_text = full_text if cap <= 0 else full_text[:cap]
                         else:
                             # Fallback to concatenated chunks with no cap
-                            input_text = self.window.large_doc_manager.build_summary_context(doc_key, max_chars=10**9)
+                            input_text = document_manager.build_summary_context(doc_key, max_chars=10**9)
                     else:
                         # Online models: keep within cap
                         cap = self.window._get_online_summary_char_cap()
-                        input_text = self.window.large_doc_manager.build_summary_context(doc_key, max_chars=cap)
+                        input_text = document_manager.build_summary_context(doc_key, max_chars=cap)
                 elif file_path and not (input_text or "").strip():
                     # Extract text from file (includes OCR for images)
                     if not os.path.exists(file_path):
@@ -2783,7 +2774,7 @@ class _AnalysisWorker(QObject):
             doc_key_out = ""
             try:
                 effective_text = (input_text or "").strip()
-                if doc_key and self.window.large_doc_manager.has_vector_store(doc_key):
+                if doc_key and document_manager is not None and document_manager.has_vector_store(doc_key):
                     doc_key_out = doc_key
             except Exception:
                 effective_text = ""
@@ -2827,26 +2818,30 @@ class _QAWorker(QObject):
                 self.error.emit("No model selected for Q&A", self.session_id)
                 return
 
-            # First, classify the question type in the background thread
+            # Classify the question and extract any counting operand in the background thread.
             try:
-                # Extract the latest user question
                 question = ""
                 for m in reversed(messages or []):
                     if m.get("role") == "user":
                         question = (m.get("content", "") or "").strip()
                         break
                 if question:
-                    qtype = self.window._classify_question_type(question, provider, model, gemini_key or "")
-                    if qtype == "COUNT":
-                        try:
-                            count_result = self.window._handle_counting_question(question, doc_key)
-                            self.finished.emit(count_result or "", self.session_id)
+                    intent = self.window._classify_question_intent(
+                        question,
+                        provider,
+                        model,
+                        gemini_key or "",
+                    )
+                    if intent.get("operation") in {
+                        "literal_occurrence_count",
+                        "structural_count",
+                    }:
+                        count_result = self.window._handle_counting_intent(intent, doc_key)
+                        if count_result:
+                            self.finished.emit(count_result, self.session_id)
                             return
-                        except Exception:
-                            # Fall back to normal RAG if counting fails
-                            pass
             except Exception:
-                # On any classification error, proceed with normal flow
+                # On any classification or local counting error, proceed with normal RAG.
                 pass
 
             if doc_key and not (gemini_key or "").strip():
@@ -2914,7 +2909,8 @@ class LargeDocProcessWorker(QObject):
                     self.error.emit("Could not extract text from the file or file is empty.", self.session_id)
                 return
             
-            chunk_count = self.window.large_doc_manager.prepare_document(
+            document_manager = _document_manager_for(self.window)
+            chunk_count = document_manager.prepare_document(
                 self.doc_key,
                 self.file_path,
                 text,
@@ -2955,7 +2951,8 @@ class PastedTextProcessWorker(QObject):
                 return
             # Use a descriptive source label for metadata
             source_label = f"pasted:{self.doc_key}"
-            chunk_count = self.window.large_doc_manager.prepare_document(
+            document_manager = _document_manager_for(self.window)
+            chunk_count = document_manager.prepare_document(
                 self.doc_key,
                 source_label,
                 clean_text,
