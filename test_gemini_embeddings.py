@@ -3,8 +3,11 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from gemini_ocr import GEMINI_OCR_PIPELINE_VERSION
+from gemini_gateway import GeminiCancelledError, GeminiGateway, GeminiRequestError
+import large_doc_manager
 from large_doc_manager import GeminiEmbeddingClient, LargeDocumentManager
 
 
@@ -40,10 +43,39 @@ class _FakeClient:
         self.closed = True
 
 
+class _FakeTypes:
+    HttpOptions = staticmethod(lambda **kwargs: type("HttpOptions", (), kwargs)())
+    EmbedContentConfig = staticmethod(lambda **kwargs: type("EmbedContentConfig", (), kwargs)())
+    class Part:
+        @staticmethod
+        def from_text(text):
+            return type("PartValue", (), {"text": text})()
+    class Content:
+        def __init__(self, role, parts):
+            self.role = role
+            self.parts = parts
+
+
+class _FakeSdk:
+    def __init__(self, client):
+        self.client = client
+    def Client(self, **_kwargs):
+        return self.client
+
+
 class GeminiEmbeddingClientTests(unittest.TestCase):
+    def _embedding_client(self):
+        fake_client = _FakeClient()
+        with patch.object(
+            large_doc_manager,
+            "GeminiGateway",
+            lambda key: GeminiGateway(key, sdk=_FakeSdk(fake_client), types_module=_FakeTypes),
+        ):
+            client = GeminiEmbeddingClient("test-key")
+        return client, fake_client
+
     def test_documents_are_sent_as_separate_content_objects(self):
-        embedding_client = GeminiEmbeddingClient("test-key")
-        embedding_client._client = _FakeClient()
+        embedding_client, fake_client = self._embedding_client()
 
         vectors = embedding_client.embed_documents(
             ["first chunk", "second chunk"],
@@ -52,48 +84,57 @@ class GeminiEmbeddingClientTests(unittest.TestCase):
 
         self.assertEqual(len(vectors), 2)
         self.assertEqual(len(vectors[0]), GeminiEmbeddingClient.DIMENSION)
-        model, contents, config = embedding_client._client.models.requests[0]
+        model, contents, config = fake_client.models.requests[0]
         self.assertEqual(model, "gemini-embedding-2")
         self.assertEqual(len(contents), 2)
         self.assertEqual(config.output_dimensionality, 768)
         self.assertEqual(contents[0].parts[0].text, "title: example.pdf | text: first chunk")
 
     def test_query_uses_question_answering_instruction(self):
-        embedding_client = GeminiEmbeddingClient("test-key")
-        embedding_client._client = _FakeClient()
+        embedding_client, fake_client = self._embedding_client()
 
         vector = embedding_client.embed_query("What is the conclusion?")
 
         self.assertEqual(len(vector), GeminiEmbeddingClient.DIMENSION)
-        _model, contents, _config = embedding_client._client.models.requests[0]
+        _model, contents, _config = fake_client.models.requests[0]
         self.assertEqual(
             contents[0].parts[0].text,
             "task: question answering | query: What is the conclusion?",
         )
 
     def test_close_releases_sdk_client(self):
-        embedding_client = GeminiEmbeddingClient("test-key")
-        fake_client = _FakeClient()
-        embedding_client._client = fake_client
+        embedding_client, fake_client = self._embedding_client()
 
         embedding_client.close()
 
         self.assertTrue(fake_client.closed)
 
     def test_rate_limit_error_is_user_friendly(self):
-        error = GeminiEmbeddingClient._friendly_error(Exception("429 RESOURCE_EXHAUSTED"))
+        error = GeminiEmbeddingClient._friendly_error(
+            GeminiRequestError("quota", "Gemini usage limit reached.")
+        )
         self.assertIn("free-tier limit", str(error))
 
+    def test_cancellation_between_embedding_batches_stops_followup_requests(self):
+        embedding_client, fake_client = self._embedding_client()
+        with patch.object(
+            GeminiGateway,
+            "check_cancelled",
+            side_effect=[None, None, GeminiCancelledError("cancelled")],
+        ):
+            with self.assertRaises(GeminiCancelledError):
+                embedding_client.embed_documents(["chunk"] * 70)
+        self.assertEqual(len(fake_client.models.requests), 1)
+
     def test_large_input_is_split_into_safe_batches(self):
-        embedding_client = GeminiEmbeddingClient("test-key")
-        embedding_client._client = _FakeClient()
+        embedding_client, fake_client = self._embedding_client()
         texts = ["x" * 1200 for _index in range(70)]
 
         vectors = embedding_client.embed_documents(texts, title="large.txt")
 
         self.assertEqual(len(vectors), len(texts))
-        self.assertGreater(len(embedding_client._client.models.requests), 1)
-        for _model, contents, _config in embedding_client._client.models.requests:
+        self.assertGreater(len(fake_client.models.requests), 1)
+        for _model, contents, _config in fake_client.models.requests:
             self.assertLessEqual(len(contents), GeminiEmbeddingClient.MAX_BATCH_ITEMS)
 
 
@@ -106,6 +147,9 @@ class _FakeEmbeddingClient:
 
     def embed_query(self, query):
         return [1.0] * GeminiEmbeddingClient.DIMENSION
+
+    def close(self):
+        pass
 
 
 class DocumentKeyTests(unittest.TestCase):

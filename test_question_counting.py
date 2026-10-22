@@ -33,14 +33,13 @@ class QuestionCountingTests(unittest.TestCase):
             "unit": "",
         })
 
-        with patch.object(main_window, "genai", object()), patch.object(
+        with patch.object(
             window,
             "_generate_gemini_text",
             return_value=response,
         ) as generate:
             intent = window._classify_question_intent(
                 "How many times does the word BASELINEQUARTZ appear in the document?",
-                "gemini",
                 "ignored",
                 "key",
             )

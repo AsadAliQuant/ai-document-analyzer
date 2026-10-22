@@ -1,7 +1,8 @@
 import os
 from typing import Optional
 
-from gemini_fallback import GEMINI_MODEL_FALLBACKS, call_with_model_fallback
+from gemini_fallback import GEMINI_MODEL_FALLBACKS, GEMINI_GENERATION_TIMEOUT_MS
+from gemini_gateway import GeminiCancelledError, GeminiGateway, GeminiRequestError
 
 
 GEMINI_OCR_MODELS = GEMINI_MODEL_FALLBACKS
@@ -9,7 +10,7 @@ GEMINI_OCR_MODEL = GEMINI_OCR_MODELS[0]
 GEMINI_OCR_PIPELINE_VERSION = (
     "gemini-image-ocr:v2:" + ">".join(GEMINI_OCR_MODELS)
 )
-GEMINI_OCR_TIMEOUT_MS = 60_000
+GEMINI_OCR_TIMEOUT_MS = GEMINI_GENERATION_TIMEOUT_MS
 
 _OCR_PROMPT = """Transcribe all visible text in this image.
 
@@ -70,28 +71,10 @@ def extract_text_from_image(file_path: str, api_key: str) -> str:
     if not _has_valid_image_header(image_bytes, extension):
         raise GeminiOcrError("invalid_image", "image data is damaged or does not match its extension")
 
+    gateway = None
     try:
-        from google import genai  # type: ignore
-        from google.genai import types  # type: ignore
-    except Exception as exc:
-        raise GeminiOcrError("sdk_missing", str(exc)) from exc
-
-    client = None
-    try:
-        client = genai.Client(
-            api_key=key,
-            http_options=types.HttpOptions(timeout=GEMINI_OCR_TIMEOUT_MS),
-        )
-        response, _used_model = call_with_model_fallback(
-            lambda model: client.models.generate_content(
-                model=model,
-                contents=[
-                    _OCR_PROMPT,
-                    types.Part.from_bytes(data=image_bytes, mime_type=mime_type),
-                ],
-                config=types.GenerateContentConfig(temperature=0),
-            )
-        )
+        gateway = GeminiGateway(key)
+        response = gateway.transcribe_image(image_bytes, mime_type, _OCR_PROMPT)
         if _response_was_blocked(response):
             raise GeminiOcrError("blocked")
 
@@ -101,14 +84,18 @@ def extract_text_from_image(file_path: str, api_key: str) -> str:
         return transcription.strip()
     except GeminiOcrError:
         raise
+    except GeminiCancelledError:
+        raise
+    except GeminiRequestError as exc:
+        reason = exc.category if exc.category in {"auth", "quota", "invalid_image", "model_unavailable", "timeout", "network", "service"} else "service"
+        raise GeminiOcrError(reason) from None
     except Exception as exc:
+        if "google gen ai sdk is unavailable" in str(exc).lower():
+            raise GeminiOcrError("sdk_missing") from exc
         raise _map_api_error(exc) from exc
     finally:
-        if client is not None:
-            try:
-                client.close()
-            except Exception:
-                pass
+        if gateway is not None:
+            gateway.close()
 
 
 def _has_valid_image_header(image_bytes: bytes, extension: str) -> bool:

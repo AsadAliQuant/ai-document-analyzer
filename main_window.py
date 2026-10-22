@@ -27,10 +27,7 @@ from ui_main_window import Ui_MainWindow
 from settings_window import SettingsWindow
 from typing import Optional, List
 import locale
-from gemini_fallback import (
-    GEMINI_GENERATION_TIMEOUT_MS,
-    call_with_model_fallback,
-)
+from gemini_gateway import GeminiCancelledError, GeminiGateway
 from gemini_ocr import (
     GEMINI_OCR_PIPELINE_VERSION,
     GeminiOcrError,
@@ -70,18 +67,6 @@ try:
     from docx import Document  # type: ignore
 except Exception:
     Document = None  # type: ignore
-
-try:
-    from google import genai  # type: ignore
-    from google.genai import types as genai_types  # type: ignore
-except Exception:
-    genai = None  # type: ignore
-    genai_types = None  # type: ignore
-
-try:
-    import ollama as ollama_client  # Python client
-except Exception:
-    ollama_client = None
 
 class MainWindow(LoadingOverlayMixin, QMainWindow):
     def __init__(self):
@@ -706,35 +691,17 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 QMessageBox.information(self, "Input Required", "Please choose a supported file (PDF/DOCX/TXT/PNG/JPG).")
                 return
 
-        provider = ""
         gemini_key = self._get_gemini_key()
         model = self.ui.availableModelCombo.currentText() if hasattr(self.ui, 'availableModelCombo') else ""
         if source.startswith("Offline"):
-            provider = "ollama"
-            if not ollama_client:
-                QMessageBox.warning(self, "Ollama", "Ollama client not available. Please install ollama and its Python package.")
-                return
-            if not self.is_ollama_server_running():
-                QMessageBox.warning(self, "Ollama", "Ollama server is not running. Please start the Ollama service.")
-                return
-            if not model or model.startswith("Ollama not") or model.startswith("No models") or model.startswith("Ollama server"):
-                QMessageBox.information(self, "Ollama", "No valid local model selected.")
-                return
-            # Check if selected model is not an embedding model
-            if model.startswith("nomic-embed-text"):
-                QMessageBox.warning(self, "Invalid Model", "Please select a chat model for summarization, not an embedding model.")
-                return
-            self._set_status(f"Offline - Running {model}...")
+            QMessageBox.warning(self, "Offline mode unavailable", "Please select Gemini. Offline mode is being removed.")
+            return
         elif "Gemini" in source:
-            provider = "gemini"
             if not model or model.startswith("Missing"):
                 QMessageBox.information(self, "Gemini", "Please select a valid Gemini model.")
                 return
             if not gemini_key:
                 QMessageBox.warning(self, "Gemini", "Missing GOOGLE_API_KEY. Add it in Settings.")
-                return
-            if genai is None:
-                QMessageBox.warning(self, "Gemini", "Google Gen AI SDK not installed. Please install 'google-genai'.")
                 return
             self._set_status(f"Online - Gemini {model} ...")
         else:
@@ -755,7 +722,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
 
         # Prepare params for background execution using the key captured on the UI thread.
         params = {
-            "provider": provider,
             "model": model,
             "is_image": is_image,
             "file_path": file_path,
@@ -909,8 +875,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             lines.append(f"{prefix}: {content}")
         return "\n".join(lines)
 
-    def _classify_question_intent(self, question: str, provider: str, model: str, gemini_key: str = "") -> dict:
-        """Use the selected AI provider to classify Q&A intent and counting operands."""
+    def _classify_question_intent(self, question: str, model: str, gemini_key: str = "") -> dict:
+        """Use Gemini to classify Q&A intent and counting operands."""
         default_intent = {"operation": "semantic_qa", "target": "", "unit": ""}
         if not question.strip():
             return default_intent
@@ -950,24 +916,13 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         }
 
         try:
-            if provider == "ollama":
-                if not ollama_client:
-                    return default_intent
-                result = ollama_client.generate(model=model, prompt=intent_prompt, stream=False)
-                if isinstance(result, dict):
-                    response = result.get("response", "")
-                else:
-                    response = str(getattr(result, "response", ""))
-            elif provider == "gemini":
-                if not genai or not gemini_key:
-                    return default_intent
-                response = self._generate_gemini_text(
-                    intent_prompt,
-                    gemini_key,
-                    response_json_schema=response_schema,
-                ) or ""
-            else:
+            if not gemini_key:
                 return default_intent
+            response = self._generate_gemini_text(
+                intent_prompt,
+                gemini_key,
+                response_json_schema=response_schema,
+            ) or ""
 
             return self._parse_question_intent(response)
         except Exception as e:
@@ -1295,11 +1250,14 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
 
         # Use full original document text (extracted or pasted) by default
         include_input = True
-        provider = self.ui.modelSourceCombo.currentText() if hasattr(self.ui, 'modelSourceCombo') else ""
+        source = self.ui.modelSourceCombo.currentText() if hasattr(self.ui, 'modelSourceCombo') else ""
         model = self.ui.availableModelCombo.currentText() if hasattr(self.ui, 'availableModelCombo') else ""
         # Check if selected model is valid for Q&A
-        if provider.startswith("Offline") and model.startswith("nomic-embed-text"):
-            QMessageBox.warning(self, "Invalid Model", "Please select a chat model for Q&A, not an embedding model.")
+        if source.startswith("Offline"):
+            QMessageBox.warning(self, "Offline mode unavailable", "Please select Gemini. Offline mode is being removed.")
+            return
+        if "Gemini" not in source:
+            QMessageBox.information(self, "Q&A", "Please select Gemini.")
             return
 
         self._append_chat("You", question)
@@ -1308,15 +1266,12 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self._set_qa_controls_enabled(False)
         self._start_qa_typing_indicator()
 
-        # Determine provider and API key (classification will run in the worker thread)
-        provider_type = "ollama" if provider.startswith("Offline") else ("gemini" if "Gemini" in provider else "")
-        # Gemini Embedding powers RAG for both online and offline chat models.
-        needs_gemini_key = bool(self._qa_vector_doc_key) or "Gemini" in provider
+        # Capture the key on the UI thread; classification runs in the worker.
+        needs_gemini_key = bool(self._qa_vector_doc_key) or "Gemini" in source
         gemini_key = self._get_gemini_key() if needs_gemini_key else ""
 
         # Continue with normal RAG processing for non-counting questions
         params = {
-            "provider": provider_type,
             "model": model,
             "messages": list(self._qa_messages),
             "summary": self._last_summary_text,
@@ -1690,14 +1645,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         except Exception:
             pass
 
-        source = self.ui.modelSourceCombo.currentText() if hasattr(self.ui, 'modelSourceCombo') else ""
-        provider = "gemini" if source.startswith("Online") else ("ollama" if "Offline" in source else "")
-        params = {
-            "provider": provider,
-        }
-
         thread = QThread(self)
-        worker = _RefreshWorker(self, params)
+        worker = _RefreshWorker(self)
         worker.moveToThread(thread)
         thread.started.connect(worker.run)
         worker.finished.connect(self._on_refresh_finished)
@@ -1709,23 +1658,17 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self._refresh_worker = worker
         thread.start()
 
-    @pyqtSlot(str, list, str)
-    def _on_refresh_finished(self, provider: str, items: list, message: str):
+    @pyqtSlot(list, str)
+    def _on_refresh_finished(self, items: list, message: str):
         try:
             if hasattr(self.ui, 'availableModelCombo'):
                 # Always clear the combo first to remove any "Loading models..." message
                 self.ui.availableModelCombo.clear()
-                if provider == "ollama":
-                    if items:
-                        self.ui.availableModelCombo.addItems(items)
-                    else:
-                        self.ui.availableModelCombo.addItem(message or "No models installed")
-                elif provider == "gemini":
-                    if items:
-                        self.ui.availableModelCombo.addItems(items)
-                    else:
-                        # Show informative message but leave combo enabled
-                        self.ui.availableModelCombo.addItem(message or "No Key Found")
+                if items:
+                    self.ui.availableModelCombo.addItems(items)
+                else:
+                    # Show informative message but leave combo enabled.
+                    self.ui.availableModelCombo.addItem(message or "No Key Found")
                 # Always re-enable after loading completes, regardless of whether items were loaded
                 try:
                     self.ui.availableModelCombo.setEnabled(True)
@@ -1961,49 +1904,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         return extract_text_from_image(file_path, gemini_key)
 
     # --- Summarization Helpers ---
-    def summarize_text_offline(self, model: str, input_text: str) -> str:
-        schema = (
-            '{\n'
-            '  "summary": {\n'
-            '    "key_points": ["...", "..."],\n'
-            '    "methods": ["...", "..."],\n'
-            '    "conclusions": ["...", "..."]\n'
-            '  }\n'
-            '}'
-        )
-        is_ar = getattr(self, '_current_lang', 'en') == 'ar'
-        if is_ar:
-            prompt = (
-                "أنت مُلخِّص أكاديمي خبير. يجب أن تُرجع الملخص بصيغة JSON صارمة فقط. "
-                "لخّص نص المستند المقدم فقط. ركّز على النقاط الرئيسية والأساليب والاستنتاجات. بدون أي تعليقات إضافية.\n\n"
-                f"نص المستند:\n{input_text}\n\n"
-                "أعد الملخص بهذا الهيكل JSON:\n"
-                f"{schema}\n\n"
-                "أرجع JSON صالح فقط دون أي أسطر برمجية أو نص خارج JSON. اكتب المحتوى باللغة العربية."
-            )
-        else:
-            prompt = (
-                "You are an expert summarizer. You must return the summary in strict JSON format. "
-                "Summarize only the provided document text. Focus on key points, methods, and conclusions. No extra commentary. "
-                "You must always provide content for all three fields (key_points, methods, conclusions), even if the document does not explicitly contain them. "
-                "If necessary, infer plausible entries to ensure each field is filled.\n\n"
-                f"Document text:\n{input_text}\n\n"
-                "Return the summary in this JSON structure:\n"
-                f"{schema}\n\n"
-                "Return only valid JSON without code fences. Write the content in English."
-            )
-        result = ollama_client.generate(model=model, prompt=prompt, format='json', stream=False)
-        if isinstance(result, dict):
-            return result.get('response', '') or ''
-        # Support typed responses from newer clients
-        try:
-            resp = getattr(result, 'response', '')
-            if resp:
-                return resp
-        except Exception:
-            pass
-        return str(result)
-
     def _generate_gemini_text(
         self,
         prompt: str,
@@ -2011,34 +1911,15 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         system_instruction: Optional[str] = None,
         response_json_schema: Optional[dict] = None,
     ) -> Optional[str]:
-        if genai is None or genai_types is None:
-            raise RuntimeError("The Google Gen AI SDK is unavailable. Install 'google-genai'.")
-
-        client = genai.Client(
-            api_key=api_key,
-            http_options=genai_types.HttpOptions(timeout=GEMINI_GENERATION_TIMEOUT_MS),
-        )
+        gateway = GeminiGateway(api_key)
         try:
-            config_kwargs = {"system_instruction": system_instruction}
-            if response_json_schema is not None:
-                config_kwargs.update(
-                    response_mime_type="application/json",
-                    response_json_schema=response_json_schema,
-                )
-            config = genai_types.GenerateContentConfig(**config_kwargs)
-            response, _used_model = call_with_model_fallback(
-                lambda fallback_model: client.models.generate_content(
-                    model=fallback_model,
-                    contents=prompt,
-                    config=config,
-                )
+            return gateway.generate_text(
+                prompt,
+                system_instruction=system_instruction,
+                response_schema=response_json_schema,
             )
-            return getattr(response, "text", None)
         finally:
-            try:
-                client.close()
-            except Exception:
-                pass
+            gateway.close()
 
     def summarize_text_gemini(self, _model: str, input_text: str, api_key: str) -> Optional[str]:
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
@@ -2319,102 +2200,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         except Exception:
             return body_inner_html
     # --- Q&A Helpers ---
-    def answer_question_offline(
-        self,
-        model: str,
-        messages,
-        summary: str,
-        input_text: str,
-        doc_key: str = "",
-        gemini_key: str = "",
-    ) -> str:
-        # Build system + user prompts with robust instructions for safety flags, counts, and dialogue
-        is_ar = getattr(self, '_current_lang', 'en') == 'ar'
-        if is_ar:
-            system_prompt = (
-                "أنت مساعد ذكاء اصطناعي يحلل مستنداً واحداً مُقدماً (نص عادي أو ملف PDF وغيرها) ويجيب فقط عن الأسئلة المتعلقة بمحتواه. "
-                "تعامَل مع جميع أنواع الأسئلة مثل: هل يتضمن المستند أي عنف؟ كم مرة تكررت الكلمة \"___\"؟ عمّ يتحدث الحوار بين \"الشخصية\" و\"الشخصية\"؟ هل يتضمن المستند أفكاراً أو ألفاظاً مسيئة للقانون أو للوطن؟ وهل يحتوي على كلمات تستهدف قبيلة؟ "
-                "تذكّر المحادثة السابقة مع المستخدم واستخدمها للسياق."
-            )
-        else:
-            system_prompt = (
-                "You are an AI assistant that analyzes a single provided document (plain text, PDF, etc.) and answers only questions about its content. "
-                "Handle all types of questions such as: \"Does the document include any form of violence?\", \"How many times was the word repeated?\", \"What is the conversation about between character A and character B?\", \"Does the document include offensive ideas or words against the law or the country?\", and \"Does it contain words targeting a tribe?\" "
-                "Remember the previous conversation with the user and use it for context."
-            )
-        # Strictly use original document text only (no summary fallback)
-        document_text = (input_text or "").strip()
-        user_question = ""
-        for m in reversed(messages or []):
-            if m.get("role") == "user":
-                user_question = (m.get("content", "") or "").strip()
-                break
-        vector_context = ""
-        if doc_key:
-            try:
-                document_manager = self._get_large_doc_manager()
-                docs = document_manager.retrieve_context(
-                    doc_key,
-                    user_question or "",
-                    api_key=gemini_key,
-                )
-            except Exception as exc:
-                raise RuntimeError(str(exc)) from exc
-            if docs:
-                collected: List[str] = []
-                for doc in docs:
-                    chunk = getattr(doc, 'page_content', '') or ''
-                    if chunk.strip():
-                        collected.append(chunk.strip())
-                vector_context = "\n\n".join(collected)
-        context_text = vector_context or document_text
-        if not context_text:
-            return "لا يوجد نص مستند متاح للأسئلة والأجوبة." if is_ar else "No document context available for Q&A."
-        # Build conversation history
-        conversation_history = ""
-        if messages and len(messages) > 1:
-            history_lines = []
-            # Include all messages except the last user question (we'll add it separately)
-            for m in messages[:-1]:
-                role = m.get("role", "user")
-                content = m.get("content", "")
-                if role == "user":
-                    prefix = "المستخدم" if is_ar else "User"
-                else:
-                    prefix = "المساعد" if is_ar else "Assistant"
-                history_lines.append(f"{prefix}: {content}")
-            if history_lines:
-                conversation_history = "\n".join(history_lines)
-        
-        # Build the final prompt with conversation history
-        if is_ar:
-            user_prompt = "مقاطع سياقية:\n" + context_text + "\n\n"
-            if conversation_history:
-                user_prompt += "محادثة سابقة:\n" + conversation_history + "\n\n"
-            user_prompt += (
-                "سؤال المستخدم الحالي:\n" + user_question + "\n\n" +
-                "أجب بالعربية اعتماداً فقط على نص المستند والمحادثة السابقة. لا تُضِف معلومات خارجية."
-            )
-        else:
-            user_prompt = "Context passages:\n" + context_text + "\n\n"
-            if conversation_history:
-                user_prompt += "Previous conversation:\n" + conversation_history + "\n\n"
-            user_prompt += (
-                "Current User Question:\n" + user_question + "\n\n" +
-                "Answer strictly based on the document text and previous conversation only."
-            )
-        prompt = system_prompt + "\n\n" + user_prompt
-        result = ollama_client.generate(model=model, prompt=prompt, stream=False)
-        if isinstance(result, dict):
-            return result.get('response', '') or ''
-        try:
-            resp = getattr(result, 'response', '')
-            if resp:
-                return resp
-        except Exception:
-            pass
-        return str(result)
-
     def answer_question_gemini(self, _model: str, messages, summary: str, input_text: str, api_key: str, doc_key: str = "") -> Optional[str]:
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         if is_ar:
@@ -2445,6 +2230,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                     user_question or "",
                     api_key=api_key,
                 )
+            except GeminiCancelledError:
+                raise
             except Exception as exc:
                 raise RuntimeError(str(exc)) from exc
             if docs:
@@ -2521,28 +2308,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             pass
         return {}
 
-    def _get_selected_model(self) -> str:
-        """Get the currently selected model from UI."""
-        try:
-            if hasattr(self.ui, 'availableModelCombo'):
-                selected = self.ui.availableModelCombo.currentText().strip()
-                if selected and not selected.startswith("Ollama") and not selected.startswith("No models") and not selected.startswith("Failed"):
-                    return selected
-        except Exception:
-            pass
-        # Default fallback - try some common models
-        fallback_models = ["llama3.2", "llama3.1", "mistral", "codellama"]
-        for model in fallback_models:
-            try:
-                # Quick check if model might be available (this is a rough check)
-                if self.is_ollama_available() and self.is_ollama_server_running():
-                    available = self.list_ollama_models()
-                    if model in available:
-                        return model
-            except Exception:
-                pass
-        return "llama3.2"  # Final fallback
-
     def _get_gemini_key(self) -> str:
         """Get the Gemini API key from config or QSettings."""
         try:
@@ -2567,92 +2332,19 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         except Exception:
             return 12000
 
-    def _get_offline_summary_char_cap(self) -> int:
-        """Optional cap for offline summarization. 0 or negative means unlimited.
-
-        Config key: OFFLINE_SUMMARY_CHAR_CAP (int). Default: 0 (unlimited)
-        """
-        try:
-            data = self._read_config()
-            val = int(data.get("OFFLINE_SUMMARY_CHAR_CAP", 0))
-            return max(0, val)
-        except Exception:
-            return 0
-
-    def is_ollama_available(self) -> bool:
-        return ollama_client is not None
-
-    def is_ollama_server_running(self) -> bool:
-        if not ollama_client:
-            return False
-        try:
-            # If the server is down, this will raise a connection error
-            _ = ollama_client.list()
-            return True
-        except Exception:
-            return False
-
-    def list_ollama_models(self) -> list:
-        if not ollama_client:
-            return []
-        try:
-            data = ollama_client.list()
-            # Support both dict responses and typed objects (ListResponse)
-            if isinstance(data, dict):
-                models = data.get('models', [])
-            else:
-                models = getattr(data, 'models', [])
-
-            names = []
-            for m in models:
-                if isinstance(m, dict):
-                    name = m.get('name') or m.get('model')
-                else:
-                    name = getattr(m, 'name', None) or getattr(m, 'model', None)
-                if name:
-                    names.append(name)
-            return names
-        except Exception:
-            return []
-
-    def populate_ollama_models(self):
+    def populate_online_models(self):
         if not hasattr(self.ui, 'availableModelCombo'):
             return
         self.ui.availableModelCombo.clear()
-        # Ensure the model combo is enabled for Offline source
+        if not self._get_gemini_key():
+            # Show informative message inside the dropdown and disable it.
+            self.ui.availableModelCombo.addItem("No Key Found")
+            return
         try:
             self.ui.availableModelCombo.setEnabled(True)
         except Exception:
             pass
-        if not self.is_ollama_available():
-            self.ui.availableModelCombo.addItem("Ollama not available")
-            return
-        if not self.is_ollama_server_running():
-            self.ui.availableModelCombo.addItem("Ollama server is not running")
-            return
-        names = self.list_ollama_models()
-        # Exclude embedding models from LLM selection
-        names = [name for name in names if not name.startswith("nomic-embed-text")]
-        if names:
-            self.ui.availableModelCombo.addItems(names)
-        else:
-            self.ui.availableModelCombo.addItem("No chat models available")
-
-    def populate_online_models(self, provider: str):
-        if not hasattr(self.ui, 'availableModelCombo'):
-            return
-        self.ui.availableModelCombo.clear()
-        if provider == "gemini":
-            key = self._get_gemini_key()
-            if not key:
-                # Show informative message inside the dropdown and disable it
-                self.ui.availableModelCombo.addItem("No Key Found")
-                return
-            try:
-                self.ui.availableModelCombo.setEnabled(True)
-            except Exception:
-                pass
-            self.ui.availableModelCombo.addItems(self.online_models_gemini)
+        self.ui.availableModelCombo.addItems(self.online_models_gemini)
 
     def _on_lock_status_changed(self, is_locked: bool):
         """Handle lock status changes from the lock manager."""
@@ -2729,7 +2421,6 @@ class _AnalysisWorker(QObject):
     @pyqtSlot()
     def run(self):
         try:
-            provider = self.params.get("provider")
             model = self.params.get("model")
             is_image = self.params.get("is_image")
             file_path = self.params.get("file_path")
@@ -2743,19 +2434,8 @@ class _AnalysisWorker(QObject):
                 if doc_key:
                     document_manager = _document_manager_for(self.window)
                 if doc_key and document_manager.has_vector_store(doc_key):
-                    # Prefer full raw text for offline; cap for online
-                    if provider == "ollama":
-                        full_text = document_manager.read_full_text(doc_key)
-                        if full_text and full_text.strip():
-                            cap = self.window._get_offline_summary_char_cap()
-                            input_text = full_text if cap <= 0 else full_text[:cap]
-                        else:
-                            # Fallback to concatenated chunks with no cap
-                            input_text = document_manager.build_summary_context(doc_key, max_chars=10**9)
-                    else:
-                        # Online models: keep within cap
-                        cap = self.window._get_online_summary_char_cap()
-                        input_text = document_manager.build_summary_context(doc_key, max_chars=cap)
+                    cap = self.window._get_online_summary_char_cap()
+                    input_text = document_manager.build_summary_context(doc_key, max_chars=cap)
                 elif file_path and not (input_text or "").strip():
                     # Extract text from file (includes OCR for images)
                     if not os.path.exists(file_path):
@@ -2766,11 +2446,14 @@ class _AnalysisWorker(QObject):
                         self.error.emit("", "Could not extract text from the selected file.", self.session_id)
                         return
                     input_text = extracted
+            except GeminiCancelledError:
+                return
             except Exception as e:
                 self.error.emit("", f"Failed to extract text from file:\n{e}", self.session_id)
                 return
 
             # Determine effective document text and doc_key for Q&A
+            GeminiGateway.check_cancelled()
             doc_key_out = ""
             try:
                 effective_text = (input_text or "").strip()
@@ -2779,16 +2462,11 @@ class _AnalysisWorker(QObject):
             except Exception:
                 effective_text = ""
 
-            # Both providers summarize the same extracted document text.
-            if provider == "ollama":
-                summary = self.window.summarize_text_offline(model, input_text)
-                self.finished.emit(summary or "(No response)", "Offline - Done", "Analysis Complete", "Your offline analysis has finished.", effective_text, doc_key_out, self.session_id)
-                return
-            if provider == "gemini":
-                summary = self.window.summarize_text_gemini(model, input_text, gemini_key)
-                self.finished.emit(summary or "(No response)", "Online - Gemini Done", "Analysis Complete", "Your Gemini analysis has finished.", effective_text, doc_key_out, self.session_id)
-                return
-            self.error.emit("", "Unknown provider", self.session_id)
+            summary = self.window.summarize_text_gemini(model, input_text, gemini_key)
+            GeminiGateway.check_cancelled()
+            self.finished.emit(summary or "(No response)", "Online - Gemini Done", "Analysis Complete", "Your Gemini analysis has finished.", effective_text, doc_key_out, self.session_id)
+        except GeminiCancelledError:
+            return
         except Exception as e:
             self.error.emit("", str(e), self.session_id)
 
@@ -2806,7 +2484,6 @@ class _QAWorker(QObject):
     @pyqtSlot()
     def run(self):
         try:
-            provider = self.params.get("provider")
             model = self.params.get("model")
             messages = self.params.get("messages") or []
             summary = self.params.get("summary")
@@ -2828,7 +2505,6 @@ class _QAWorker(QObject):
                 if question:
                     intent = self.window._classify_question_intent(
                         question,
-                        provider,
                         model,
                         gemini_key or "",
                     )
@@ -2840,6 +2516,8 @@ class _QAWorker(QObject):
                         if count_result:
                             self.finished.emit(count_result, self.session_id)
                             return
+            except GeminiCancelledError:
+                return
             except Exception:
                 # On any classification or local counting error, proceed with normal RAG.
                 pass
@@ -2851,22 +2529,11 @@ class _QAWorker(QObject):
                 )
                 return
 
-            if provider == "ollama":
-                answer = self.window.answer_question_offline(
-                    model,
-                    messages,
-                    summary,
-                    input_text,
-                    doc_key,
-                    gemini_key,
-                )
-                self.finished.emit(answer or "", self.session_id)
-                return
-            if provider == "gemini":
-                answer = self.window.answer_question_gemini(model, messages, summary, input_text, gemini_key, doc_key)
-                self.finished.emit(answer or "", self.session_id)
-                return
-            self.error.emit("Unknown provider for Q&A", self.session_id)
+            answer = self.window.answer_question_gemini(model, messages, summary, input_text, gemini_key, doc_key)
+            GeminiGateway.check_cancelled()
+            self.finished.emit(answer or "", self.session_id)
+        except GeminiCancelledError:
+            return
         except Exception as e:
             self.error.emit(str(e), self.session_id)
 
@@ -2917,6 +2584,8 @@ class LargeDocProcessWorker(QObject):
                 api_key=self.gemini_key,
             )
             self.finished.emit(self.doc_key, chunk_count, self.session_id)
+        except GeminiCancelledError:
+            return
         except GeminiOcrError as exc:
             self.error.emit(f"gemini_ocr:{exc.reason}", self.session_id)
         except Exception as e:
@@ -2964,38 +2633,21 @@ class PastedTextProcessWorker(QObject):
 
 
 class _RefreshWorker(QObject):
-    finished = pyqtSignal(str, list, str)  # provider, items, message
+    finished = pyqtSignal(list, str)  # model names, message
     error = pyqtSignal(str)  # error message
 
-    def __init__(self, window: 'MainWindow', params: dict):
+    def __init__(self, window: 'MainWindow'):
         super().__init__()
         self.window = window
-        self.params = params
 
     @pyqtSlot()
     def run(self):
         try:
-            provider = self.params.get("provider")
-            if provider == "ollama":
-                # Distinguish between server-down vs no models installed
-                if not self.window.is_ollama_available():
-                    self.finished.emit("ollama", [], "Ollama not available")
-                    return
-                if not self.window.is_ollama_server_running():
-                    self.finished.emit("ollama", [], "Ollama server is not running")
-                    return
-                names = self.window.list_ollama_models()
-                msg = "No models installed" if not names else ""
-                self.finished.emit("ollama", names, msg)
+            key = self.window._get_gemini_key()
+            if not key:
+                self.finished.emit([], "No Key Found")
                 return
-            if provider == "gemini":
-                key = self.window._get_gemini_key()
-                if not key:
-                    self.finished.emit("gemini", [], "No Key Found")
-                    return
-                self.finished.emit("gemini", list(self.window.online_models_gemini), "")
-                return
-            self.error.emit("Unknown provider")
+            self.finished.emit(list(self.window.online_models_gemini), "")
         except Exception as e:
             self.error.emit(str(e))
 

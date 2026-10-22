@@ -1,7 +1,6 @@
 import hashlib
 import json
 import os
-import threading
 import time
 from typing import List, Optional
 
@@ -16,6 +15,7 @@ except Exception:
     _qdrant_available = False
 
 from langchain_core.documents import Document
+from gemini_gateway import GeminiCancelledError, GeminiGateway
 
 
 class GeminiEmbeddingClient:
@@ -33,22 +33,10 @@ class GeminiEmbeddingClient:
                 "A Gemini API key is required for document indexing and semantic search. "
                 "Add it in Settings and try again."
             )
-        try:
-            from google import genai  # type: ignore
-            from google.genai import types  # type: ignore
-        except Exception as exc:
-            raise RuntimeError(
-                "The Google Gen AI SDK is not available. Install 'google-genai'."
-            ) from exc
-
-        self._client = genai.Client(api_key=key)
-        self._types = types
+        self._gateway = GeminiGateway(key)
 
     def close(self) -> None:
-        try:
-            self._client.close()
-        except Exception:
-            pass
+        self._gateway.close()
 
     def embed_documents(self, texts: List[str], title: str = "none") -> List[List[float]]:
         clean_title = (title or "none").strip() or "none"
@@ -99,21 +87,10 @@ class GeminiEmbeddingClient:
         return batches
 
     def _embed_separate(self, prompts: List[str]) -> List[List[float]]:
-        contents = [
-            self._types.Content(
-                role="user",
-                parts=[self._types.Part.from_text(text=prompt)],
-            )
-            for prompt in prompts
-        ]
         try:
-            result = self._client.models.embed_content(
-                model=self.MODEL,
-                contents=contents,
-                config=self._types.EmbedContentConfig(
-                    output_dimensionality=self.DIMENSION,
-                ),
-            )
+            result = self._gateway.embed_contents(prompts, self.DIMENSION)
+        except GeminiCancelledError:
+            raise
         except Exception as exc:
             raise self._friendly_error(exc) from exc
 
@@ -125,25 +102,20 @@ class GeminiEmbeddingClient:
 
     @staticmethod
     def _friendly_error(exc: Exception) -> RuntimeError:
-        message = str(exc)
-        lowered = message.lower()
-        status_code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
-        if status_code == 429 or "429" in lowered or "resource_exhausted" in lowered:
+        category = getattr(exc, "category", "service")
+        if category == "quota":
             return RuntimeError(
                 "Gemini Embedding free-tier limit was reached. Wait for the quota to reset and try again."
             )
-        if status_code in {401, 403} or any(
-            term in lowered
-            for term in ("api key", "permission_denied", "permission denied", "unauthenticated")
-        ):
+        if category == "auth":
             return RuntimeError(
                 "Gemini rejected the API key. Check the Gemini API key in Settings."
             )
-        if any(term in lowered for term in ("connection", "network", "dns", "timed out", "timeout")):
+        if category in {"network", "timeout"}:
             return RuntimeError(
                 "Gemini Embedding could not connect to the internet. Check the connection and try again."
             )
-        return RuntimeError(f"Gemini Embedding request failed: {message}")
+        return RuntimeError("Gemini Embedding request failed. Please try again shortly.")
 
 
 class LargeDocumentManager:
@@ -192,7 +164,6 @@ class LargeDocumentManager:
         self.base_dir = base_dir
         self.vector_base_dir = os.path.join(self.base_dir, "vector_store")
         os.makedirs(self.vector_base_dir, exist_ok=True)
-        self._embedding_local = threading.local()
         if not _qdrant_available:
             raise RuntimeError(
                 "Qdrant is not available. Install 'qdrant-client' to enable vector storage."
@@ -317,7 +288,10 @@ class LargeDocumentManager:
         texts = [doc.page_content for doc in documents]
         metadatas = [doc.metadata for doc in documents]
         document_title = os.path.basename(file_path) if file_path else "none"
-        vectors = embeddings.embed_documents(texts, title=document_title)
+        try:
+            vectors = embeddings.embed_documents(texts, title=document_title)
+        finally:
+            embeddings.close()
         if len(vectors) != len(texts):
             raise RuntimeError("Gemini did not return an embedding for every document chunk.")
 
@@ -429,6 +403,7 @@ class LargeDocumentManager:
             return []
         
         qdrant_client = None
+        embeddings = None
         try:
             embeddings = self._embedding(api_key)
             qdrant_client = QdrantClient(path=qdrant_dir)
@@ -454,9 +429,13 @@ class LargeDocumentManager:
                 results.append(Document(page_content=page_content, metadata=metadata))
             
             return results
+        except GeminiCancelledError:
+            raise
         except Exception as e:
             raise RuntimeError(f"Failed to retrieve document context: {e}") from e
         finally:
+            if embeddings is not None:
+                embeddings.close()
             if qdrant_client is not None and hasattr(qdrant_client, "close"):
                 try:
                     qdrant_client.close()
@@ -501,15 +480,7 @@ class LargeDocumentManager:
                 "Add it in Settings and try again."
             )
 
-        client = getattr(self._embedding_local, "client", None)
-        client_key = getattr(self._embedding_local, "api_key", "")
-        if client is None or client_key != api_key:
-            if client is not None:
-                client.close()
-            client = GeminiEmbeddingClient(api_key)
-            self._embedding_local.client = client
-            self._embedding_local.api_key = api_key
-        return client
+        return GeminiEmbeddingClient(api_key)
 
 
     def _write_backend_marker(self, store_dir: str, backend: str) -> None:
