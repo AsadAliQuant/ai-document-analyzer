@@ -20,6 +20,7 @@ node_modules/
 # IDE/workspace
 .vscode/
 .idea/
+.claude/settings.local.json
 *.swp
 *.swo
 *~
