@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import patch
 
 from main_window import MainWindow, PastedTextProcessWorker
-from startup_helper import InitializationWorker
+from startup_helper import LoadingOverlayMixin
 
 
 class _Signal:
@@ -48,7 +48,7 @@ class LazyDocumentManagerTests(unittest.TestCase):
         worker.error = _Signal()
         return worker
 
-    def test_initialization_worker_does_not_import_or_construct_document_manager(self):
+    def test_startup_completion_does_not_import_or_construct_document_manager(self):
         fake_module = types.ModuleType("large_doc_manager")
         constructor_calls = []
 
@@ -60,11 +60,11 @@ class LazyDocumentManagerTests(unittest.TestCase):
         window = types.SimpleNamespace(
             app_config_dir="unused",
             large_doc_manager=None,
-            online_models_gemini=[],
+            _init_in_progress=True,
+            _hide_loading_overlay=lambda: None,
+            setEnabled=lambda _enabled: None,
+            _set_status=lambda _status: None,
         )
-        worker = InitializationWorker(window)
-        finished = _Signal()
-        worker.finished = finished
         imported = []
         real_import = builtins.__import__
 
@@ -77,12 +77,12 @@ class LazyDocumentManagerTests(unittest.TestCase):
             "builtins.__import__",
             side_effect=guarded_import,
         ):
-            worker.run()
+            LoadingOverlayMixin._on_init_finished(window)
 
         self.assertEqual(imported, [])
         self.assertEqual(constructor_calls, [])
         self.assertIsNone(window.large_doc_manager)
-        self.assertEqual(finished.calls, [()])
+        self.assertFalse(window._init_in_progress)
 
     def test_concurrent_workers_construct_document_manager_once(self):
         window = self._window()

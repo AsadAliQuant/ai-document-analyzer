@@ -1,55 +1,8 @@
 """
-Startup helper module for background initialization and loading overlay.
+Startup loading overlay and ready-state helper.
 """
 from PyQt6.QtWidgets import QFrame, QVBoxLayout, QLabel
-from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QTimer, Qt
-
-
-class InitializationWorker(QObject):
-    """Worker thread for heavy initialization tasks."""
-    progress = pyqtSignal(str)
-    finished = pyqtSignal()
-    
-    def __init__(self, window):
-        super().__init__()
-        self.window = window
-    
-    @pyqtSlot()
-    def run(self):
-        """Perform heavy initialization in background."""
-        try:
-            # Step 1: Initialize language
-            self.progress.emit("Initializing language")
-            # Language will be applied by the main thread if needed
-            
-            # Step 2: Leave Qdrant/NumPy out of the startup path. The document
-            # manager is initialized on first RAG use instead.
-            self.progress.emit("Preparing document features")
-
-            # Step 3: Initialize state variables
-            self.progress.emit("Initializing state")
-            self.window._qa_vector_doc_key = ""
-            self.window._pending_analysis_params = None
-            self.window._processing_thread = None
-            self.window._processing_worker = None
-
-            # Step 4: Set up model list
-            self.progress.emit("Loading models")
-            from gemini_fallback import GEMINI_MODEL_FALLBACK_LABEL
-            self.window.online_models_gemini = [GEMINI_MODEL_FALLBACK_LABEL]
-            
-            # Step 5/6: Defer any UI population and model refresh to main thread
-            self.progress.emit("Loading available models")
-            
-            # All done
-            self.progress.emit("Ready")
-            
-        except Exception as e:
-            print(f"Initialization error: {e}")
-            import traceback
-            traceback.print_exc()
-        finally:
-            self.finished.emit()
+from PyQt6.QtCore import pyqtSlot, QTimer, Qt
 
 
 class LoadingOverlayMixin:
@@ -132,19 +85,9 @@ class LoadingOverlayMixin:
         if self._loading_overlay and self._loading_overlay.isVisible():
             self._loading_overlay.setGeometry(self.rect())
     
-    @pyqtSlot(str)
-    def _on_init_progress(self, message: str):
-        """Update loading overlay with initialization progress."""
-        if getattr(self, "_keep_loading_message_constant", False):
-            self._loading_message_base = getattr(self, "_initial_loading_message", message)
-        else:
-            self._loading_message_base = message
-        self._loading_dots = 0
-    
     @pyqtSlot()
     def _on_init_finished(self):
-        """Handle completion of background initialization."""
-        print("Initialization complete")
+        """Finish startup after the window has had a chance to paint."""
         self._init_in_progress = False
         
         # Hide loading overlay
@@ -152,37 +95,6 @@ class LoadingOverlayMixin:
         
         # Re-enable UI
         self.setEnabled(True)
-        
-        # Populate model source and available models combos on the main thread
-        try:
-            if hasattr(self.ui, 'modelSourceCombo'):
-                self.ui.modelSourceCombo.clear()
-                self.ui.modelSourceCombo.addItems(["Online (Google Gemini)", "Offline (Ollama LLaMA)"])
-                self.ui.modelSourceCombo.setCurrentIndex(0)
-                self.ui.modelSourceCombo.setEnabled(True)
-                # Ensure the signal is connected on the main thread
-                try:
-                    self.ui.modelSourceCombo.currentIndexChanged.connect(self.on_model_source_changed)
-                except Exception:
-                    pass
-            if hasattr(self.ui, 'availableModelCombo'):
-                self.ui.availableModelCombo.clear()
-        except Exception:
-            pass
-        
-        # Kick off initial model refresh on the main thread
-        try:
-            self.on_model_source_changed()
-        except Exception:
-            pass
-        
-        # Connect Q&A signals now
-        try:
-            self.ui.questionLineEdit.returnPressed.connect(self._send_question)
-            self.ui.sendQuestionButton.clicked.connect(self._send_question)
-            self.ui.clearChatButton.clicked.connect(self._clear_chat)
-        except Exception as e:
-            print(f"Error connecting Q&A signals: {e}")
         
         # Set ready status
         self._set_status("Ready")

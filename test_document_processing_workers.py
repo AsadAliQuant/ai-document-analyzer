@@ -56,14 +56,6 @@ class _CachedImageManager:
         return doc_key == "cached-image-key"
 
 
-class _TextValue:
-    def __init__(self, value):
-        self.value = value
-
-    def currentText(self):
-        return self.value
-
-
 class _Tabs:
     def currentIndex(self):
         return 0
@@ -72,8 +64,6 @@ class _Tabs:
 class _Ui:
     def __init__(self):
         self.tabs = _Tabs()
-        self.modelSourceCombo = _TextValue("Online (Google Gemini)")
-        self.availableModelCombo = _TextValue("gemini-2.5-flash")
 
 
 class DocumentProcessingWorkerTests(unittest.TestCase):

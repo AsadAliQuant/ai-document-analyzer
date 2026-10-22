@@ -28,12 +28,13 @@ from settings_window import SettingsWindow
 from typing import Optional, List
 import locale
 from gemini_gateway import GeminiCancelledError, GeminiGateway
+from gemini_fallback import GEMINI_MODEL_FALLBACK_LABEL
 from gemini_ocr import (
     GEMINI_OCR_PIPELINE_VERSION,
     GeminiOcrError,
     extract_text_from_image,
 )
-from startup_helper import InitializationWorker, LoadingOverlayMixin
+from startup_helper import LoadingOverlayMixin
 from login_dialog import LoginDialog
 from login_overlay import LoginOverlay, LogoutOverlay
 from lock_manager import LockManager
@@ -84,7 +85,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self._login_overlay = None
         
         # Show loading overlay immediately
-        self._keep_loading_message_constant = True
         loading_text = "Loading AI Document Analyzer"
         self._create_loading_overlay()
         self._show_loading_overlay(loading_text)
@@ -172,8 +172,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         if hasattr(self.ui, 'copySummaryButton'):
             self.ui.copySummaryButton.clicked.connect(self.copy_summary_to_clipboard)
         self.ui.toggleSidebarButton.clicked.connect(self.toggle_sidebar)
-        if hasattr(self.ui, 'refreshModelsButton'):
-            self.ui.refreshModelsButton.clicked.connect(self.refresh_models)
 
         # Connect DropArea signal if available
         if hasattr(self.ui, 'dropArea'):
@@ -184,13 +182,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             except Exception:
                 pass
 
-        # Background refresh state (init before any refresh call)
-        self._refresh_thread = None
-        self._refresh_worker = None
-        self._is_refreshing = False
         self._settings_open = False
 
-        # Model source and list
         # Config lives in %APPDATA%/AI Document Analyzer/config.json (copied from working dir if present on first run)
         self.app_config_dir = self._appdata_config_dir()
         try:
@@ -207,21 +200,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self._pending_analysis_params = None
         self._processing_thread = None
         self._processing_worker = None
-        self.online_models_gemini = []
-
-        # Defer heavy initialization to background thread
-        self._init_thread = QThread(self)
-        self._init_worker = InitializationWorker(self)
-        self._init_worker.moveToThread(self._init_thread)
-        self._init_thread.started.connect(self._init_worker.run)
-        self._init_worker.progress.connect(self._on_init_progress)
-        self._init_worker.finished.connect(self._on_init_finished)
-        self._init_worker.finished.connect(self._init_thread.quit)
-        self._init_worker.finished.connect(self._init_worker.deleteLater)
-        self._init_thread.finished.connect(self._init_thread.deleteLater)
-
-        # Start initialization in background after a short delay (allow UI to paint)
-        QTimer.singleShot(100, self._init_thread.start)
+        # Finish lightweight startup after the window has had a chance to paint.
+        QTimer.singleShot(100, self._on_init_finished)
 
         # Analyze button loader state
         self._analyze_loader_timer = QTimer(self)
@@ -665,8 +645,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         return manager
 
     def analyze_document(self):
-        source = self.ui.modelSourceCombo.currentText() if hasattr(self.ui, 'modelSourceCombo') else ""
-        
         # Determine which tab is active to prioritize the correct input source
         # Tab 0 = Upload Document, Tab 1 = Paste Text
         active_tab_index = 0
@@ -692,21 +670,10 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 return
 
         gemini_key = self._get_gemini_key()
-        model = self.ui.availableModelCombo.currentText() if hasattr(self.ui, 'availableModelCombo') else ""
-        if source.startswith("Offline"):
-            QMessageBox.warning(self, "Offline mode unavailable", "Please select Gemini. Offline mode is being removed.")
+        if not gemini_key:
+            QMessageBox.warning(self, "Gemini", "Missing GOOGLE_API_KEY. Add it in Settings.")
             return
-        elif "Gemini" in source:
-            if not model or model.startswith("Missing"):
-                QMessageBox.information(self, "Gemini", "Please select a valid Gemini model.")
-                return
-            if not gemini_key:
-                QMessageBox.warning(self, "Gemini", "Missing GOOGLE_API_KEY. Add it in Settings.")
-                return
-            self._set_status(f"Online - Gemini {model} ...")
-        else:
-            QMessageBox.information(self, "Analysis", "Please select a valid source and model.")
-            return
+        self._set_status("Gemini analysis...")
 
         try:
             document_manager = self._get_large_doc_manager()
@@ -722,7 +689,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
 
         # Prepare params for background execution using the key captured on the UI thread.
         params = {
-            "model": model,
+            "model": GEMINI_MODEL_FALLBACK_LABEL,
             "is_image": is_image,
             "file_path": file_path,
             "input_text": input_text,
@@ -1247,32 +1214,23 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         if not self._last_summary_text.strip():
             QMessageBox.information(self, "Q&A", "Please generate a summary first.")
             return
+        # Capture the key on the UI thread; classification runs in the worker.
+        gemini_key = self._get_gemini_key()
+        if not gemini_key:
+            QMessageBox.warning(self, "Gemini", "Missing GOOGLE_API_KEY. Add it in Settings.")
+            return
 
         # Use full original document text (extracted or pasted) by default
         include_input = True
-        source = self.ui.modelSourceCombo.currentText() if hasattr(self.ui, 'modelSourceCombo') else ""
-        model = self.ui.availableModelCombo.currentText() if hasattr(self.ui, 'availableModelCombo') else ""
-        # Check if selected model is valid for Q&A
-        if source.startswith("Offline"):
-            QMessageBox.warning(self, "Offline mode unavailable", "Please select Gemini. Offline mode is being removed.")
-            return
-        if "Gemini" not in source:
-            QMessageBox.information(self, "Q&A", "Please select Gemini.")
-            return
-
         self._append_chat("You", question)
         self._append_history("user", question)
         self.ui.questionLineEdit.clear()
         self._set_qa_controls_enabled(False)
         self._start_qa_typing_indicator()
 
-        # Capture the key on the UI thread; classification runs in the worker.
-        needs_gemini_key = bool(self._qa_vector_doc_key) or "Gemini" in source
-        gemini_key = self._get_gemini_key() if needs_gemini_key else ""
-
         # Continue with normal RAG processing for non-counting questions
         params = {
-            "model": model,
+            "model": GEMINI_MODEL_FALLBACK_LABEL,
             "messages": list(self._qa_messages),
             "summary": self._last_summary_text,
             "input_text": (self._qa_document_text or self._last_input_text_for_qa) if include_input else "",
@@ -1351,9 +1309,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             self.settings_window.apply_language(self._current_lang)
             self.setWindowTitle("محلل المستندات الذكي" if is_ar else "AI Document Analyzer")
             self.ui.newChatButton.setText("＋ تحليل جديد" if is_ar else "＋ New Analysis")
-            self.ui.availableModelLabel.setText("النموذج:" if is_ar else "Model:")
-            self.ui.modelSourceLabel.setText("المصدر:" if is_ar else "Source:")
-            self.ui.refreshModelsButton.setText("تحديث" if is_ar else "Refresh")
             self.ui.topSettingsButton.setText("الإعدادات" if is_ar else "Settings")
             self.ui.analyzeButton.setText("تحليل المستند" if is_ar else "Analyze Document")
             # Keep base text in sync with localization
@@ -1487,8 +1442,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self.settings_window.finished.connect(self.on_settings_closed)
 
     def on_settings_closed(self):
-        # Reload models if API keys changed
-        self.on_model_source_changed()
         self._settings_open = False
         self._set_settings_buttons_enabled(True)
 
@@ -1627,95 +1580,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         except Exception:
             pass
 
-    # --- Model selection & detection ---
-    def on_model_source_changed(self):
-        # Kick off background refresh instead of blocking UI
-        self.refresh_models()
-
-    def refresh_models(self):
-        # Avoid overlapping refreshes
-        if self._is_refreshing:
-            return
-        self._is_refreshing = True
-        try:
-            if hasattr(self.ui, 'refreshModelsButton'):
-                self.ui.refreshModelsButton.setEnabled(False)
-            self._set_status("Refreshing models...")
-            self._begin_models_loading_ui()
-        except Exception:
-            pass
-
-        thread = QThread(self)
-        worker = _RefreshWorker(self)
-        worker.moveToThread(thread)
-        thread.started.connect(worker.run)
-        worker.finished.connect(self._on_refresh_finished)
-        worker.error.connect(self._on_refresh_error)
-        worker.finished.connect(thread.quit)
-        worker.finished.connect(worker.deleteLater)
-        thread.finished.connect(thread.deleteLater)
-        self._refresh_thread = thread
-        self._refresh_worker = worker
-        thread.start()
-
-    @pyqtSlot(list, str)
-    def _on_refresh_finished(self, items: list, message: str):
-        try:
-            if hasattr(self.ui, 'availableModelCombo'):
-                # Always clear the combo first to remove any "Loading models..." message
-                self.ui.availableModelCombo.clear()
-                if items:
-                    self.ui.availableModelCombo.addItems(items)
-                else:
-                    # Show informative message but leave combo enabled.
-                    self.ui.availableModelCombo.addItem(message or "No Key Found")
-                # Always re-enable after loading completes, regardless of whether items were loaded
-                try:
-                    self.ui.availableModelCombo.setEnabled(True)
-                except Exception:
-                    pass
-        except Exception:
-            pass
-        finally:
-            self._is_refreshing = False
-            try:
-                if hasattr(self.ui, 'refreshModelsButton'):
-                    self.ui.refreshModelsButton.setEnabled(True)
-                self._set_status("Ready")
-            except Exception:
-                pass
-
-    @pyqtSlot(str)
-    def _on_refresh_error(self, error_message: str):
-        try:
-            if hasattr(self.ui, 'availableModelCombo'):
-                self.ui.availableModelCombo.clear()
-                self.ui.availableModelCombo.addItem("Failed to refresh models")
-                try:
-                    self.ui.availableModelCombo.setEnabled(True)
-                except Exception:
-                    pass
-            QMessageBox.critical(self, "Models", error_message)
-        except Exception:
-            pass
-        finally:
-            self._is_refreshing = False
-            try:
-                if hasattr(self.ui, 'refreshModelsButton'):
-                    self.ui.refreshModelsButton.setEnabled(True)
-                self._set_status("Ready")
-            except Exception:
-                pass
-
-    def _begin_models_loading_ui(self):
-        try:
-            if hasattr(self.ui, 'availableModelCombo'):
-                self.ui.availableModelCombo.clear()
-                self.ui.availableModelCombo.addItem("Loading models...")
-                self.ui.availableModelCombo.setEnabled(False)
-        except Exception:
-            pass
-
     def _start_background_export(self, html: str, save_path: str):
         thread = QThread(self)
         is_ar = getattr(self, "_current_lang", "en") == "ar"
@@ -1772,15 +1636,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             return ""
         mapping = {
             "Ready": "جاهز",
-            "Refreshing models...": "تحديث النماذج...",
-            "Offline": "غير متصل",
-            "Online - Gemini": "متصل - Gemini",
-            "Offline - Done": "غير متصل - تم",
-            "Online - Gemini Done": "متصل - Gemini - تم",
-            "Ollama not available": "Ollama غير متاح",
-            "Ollama server is not running": "خادم Ollama غير قيد التشغيل",
-            "No models installed": "لا توجد نماذج مثبتة",
-            "Failed to refresh models": "فشل في تحديث النماذج",
+            "Gemini analysis...": "جارٍ التحليل باستخدام Gemini...",
+            "Gemini - Done": "Gemini - تم",
             "Extracting image text with Gemini...": "جارٍ استخراج نص الصورة باستخدام Gemini...",
             "Processing document...": "جارٍ معالجة المستند...",
             "Processing pasted text...": "جارٍ معالجة النص الملصق...",
@@ -1789,10 +1646,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         }
         if text in mapping:
             return mapping[text]
-        if text.startswith("Offline - Running "):
-            return text.replace("Offline - Running ", "غير متصل - تشغيل ")
-        if text.startswith("Online - Gemini "):
-            return text.replace("Online - Gemini ", "متصل - Gemini ")
         return text
 
     def _get_analyze_button_text(self) -> str:
@@ -2332,20 +2185,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         except Exception:
             return 12000
 
-    def populate_online_models(self):
-        if not hasattr(self.ui, 'availableModelCombo'):
-            return
-        self.ui.availableModelCombo.clear()
-        if not self._get_gemini_key():
-            # Show informative message inside the dropdown and disable it.
-            self.ui.availableModelCombo.addItem("No Key Found")
-            return
-        try:
-            self.ui.availableModelCombo.setEnabled(True)
-        except Exception:
-            pass
-        self.ui.availableModelCombo.addItems(self.online_models_gemini)
-
     def _on_lock_status_changed(self, is_locked: bool):
         """Handle lock status changes from the lock manager."""
         if is_locked:
@@ -2464,7 +2303,7 @@ class _AnalysisWorker(QObject):
 
             summary = self.window.summarize_text_gemini(model, input_text, gemini_key)
             GeminiGateway.check_cancelled()
-            self.finished.emit(summary or "(No response)", "Online - Gemini Done", "Analysis Complete", "Your Gemini analysis has finished.", effective_text, doc_key_out, self.session_id)
+            self.finished.emit(summary or "(No response)", "Gemini - Done", "Analysis Complete", "Your Gemini analysis has finished.", effective_text, doc_key_out, self.session_id)
         except GeminiCancelledError:
             return
         except Exception as e:
@@ -2490,10 +2329,6 @@ class _QAWorker(QObject):
             input_text = self.params.get("input_text")
             gemini_key = self.params.get("gemini_key")
             doc_key = self.params.get("doc_key", "")
-
-            if not model:
-                self.error.emit("No model selected for Q&A", self.session_id)
-                return
 
             # Classify the question and extract any counting operand in the background thread.
             try:
@@ -2630,26 +2465,6 @@ class PastedTextProcessWorker(QObject):
             self.finished.emit(self.doc_key, chunk_count, self.session_id)
         except Exception as e:
             self.error.emit(f"Processing failed: {str(e)}", self.session_id)
-
-
-class _RefreshWorker(QObject):
-    finished = pyqtSignal(list, str)  # model names, message
-    error = pyqtSignal(str)  # error message
-
-    def __init__(self, window: 'MainWindow'):
-        super().__init__()
-        self.window = window
-
-    @pyqtSlot()
-    def run(self):
-        try:
-            key = self.window._get_gemini_key()
-            if not key:
-                self.finished.emit([], "No Key Found")
-                return
-            self.finished.emit(list(self.window.online_models_gemini), "")
-        except Exception as e:
-            self.error.emit(str(e))
 
 
 class _ExportWorker(QObject):

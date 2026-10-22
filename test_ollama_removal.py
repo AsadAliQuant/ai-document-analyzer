@@ -1,8 +1,9 @@
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+from gemini_fallback import GEMINI_MODEL_FALLBACK_LABEL
 from gemini_gateway import GeminiCancelledError
-from main_window import MainWindow, _AnalysisWorker, _QAWorker, _RefreshWorker
+from main_window import MainWindow, _AnalysisWorker, _QAWorker
 
 
 class _Signal:
@@ -96,38 +97,13 @@ class OllamaRemovalTests(unittest.TestCase):
         self.assertEqual(worker.finished.calls, [("answer", 5)])
         self.assertEqual(worker.error.calls, [])
 
-    def test_refresh_worker_only_returns_gemini_models(self):
-        class Window:
-            online_models_gemini = ["gemini-2.5-flash"]
-
-            def _get_gemini_key(self):
-                return "captured-key"
-
-        worker = _RefreshWorker(Window())
-        worker.finished = _Signal()
-        worker.error = _Signal()
-
-        worker.run()
-
-        self.assertEqual(worker.finished.calls, [(["gemini-2.5-flash"], "")])
-        self.assertEqual(worker.error.calls, [])
-
-    def test_offline_selector_is_rejected_before_document_manager_use(self):
-        class Value:
-            def __init__(self, value):
-                self.value = value
-
-            def currentText(self):
-                return self.value
-
+    def test_analysis_without_model_controls_requires_gemini_key(self):
         class Tabs:
             def currentIndex(self):
                 return 1
 
         class Ui:
             tabs = Tabs()
-            modelSourceCombo = Value("Offline (Ollama LLaMA)")
-            availableModelCombo = Value("llama3.2")
 
         window = MainWindow.__new__(MainWindow)
         window.ui = Ui()
@@ -140,29 +116,56 @@ class OllamaRemovalTests(unittest.TestCase):
             window.analyze_document()
 
         warning.assert_called_once()
-        self.assertIn("Offline mode unavailable", warning.call_args.args[1])
+        self.assertIn("Missing GOOGLE_API_KEY", warning.call_args.args[2])
 
-    def test_qa_rejects_legacy_offline_selector(self):
+    def test_qa_without_model_controls_requires_gemini_key(self):
         class Value:
-            def __init__(self, value):
-                self.value = value
-            def currentText(self):
-                return self.value
             def text(self):
                 return "Question?"
 
         class Ui:
-            questionLineEdit = Value("")
-            modelSourceCombo = Value("Offline (Ollama LLaMA)")
-            availableModelCombo = Value("llama3.2")
+            questionLineEdit = Value()
 
         window = MainWindow.__new__(MainWindow)
         window.ui = Ui()
         window._last_summary_text = "summary"
+        window._get_gemini_key = lambda: ""
         with patch("main_window.QMessageBox.warning") as warning:
             window._send_question()
         warning.assert_called_once()
-        self.assertIn("Offline mode unavailable", warning.call_args.args[1])
+        self.assertIn("Missing GOOGLE_API_KEY", warning.call_args.args[2])
+
+    def test_qa_without_model_controls_uses_automatic_gemini_fallback(self):
+        class QuestionEdit:
+            def text(self):
+                return "Question?"
+
+            def clear(self):
+                pass
+
+        window = MainWindow.__new__(MainWindow)
+        window.ui = type("Ui", (), {"questionLineEdit": QuestionEdit()})()
+        window._last_summary_text = "summary"
+        window._qa_vector_doc_key = ""
+        window._qa_document_text = "document"
+        window._last_input_text_for_qa = ""
+        window._qa_messages = [{"role": "user", "content": "Question?"}]
+        window._session_id = 3
+        window._get_gemini_key = lambda: "captured-key"
+        window._append_chat = lambda *_args: None
+        window._append_history = lambda *_args: None
+        window._set_qa_controls_enabled = lambda *_args: None
+        window._start_qa_typing_indicator = lambda: None
+
+        with patch("main_window.QThread") as thread_class, patch("main_window._QAWorker") as worker_class:
+            thread_class.return_value = MagicMock()
+            worker_class.return_value = MagicMock()
+            window._send_question()
+
+        params = worker_class.call_args.args[1]
+        self.assertEqual(params["model"], GEMINI_MODEL_FALLBACK_LABEL)
+        self.assertEqual(params["gemini_key"], "captured-key")
+        thread_class.return_value.start.assert_called_once()
 
 
 if __name__ == "__main__":
