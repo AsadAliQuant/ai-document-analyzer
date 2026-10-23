@@ -21,11 +21,17 @@ class _RecordingManager:
     def __init__(self):
         self._lock = threading.Lock()
         self.prepare_calls = []
+        self.retrieve_calls = []
 
     def prepare_document(self, doc_key, source, text, api_key=None):
         with self._lock:
             self.prepare_calls.append((doc_key, source, text, api_key))
         return 1
+
+    def retrieve_context(self, doc_key, query, api_key=None):
+        with self._lock:
+            self.retrieve_calls.append((doc_key, query, api_key))
+        return [types.SimpleNamespace(page_content="Retrieved document context")]
 
 
 class LazyDocumentManagerTests(unittest.TestCase):
@@ -153,6 +159,49 @@ class LazyDocumentManagerTests(unittest.TestCase):
         self.assertEqual(second.error.calls, [])
         self.assertEqual(second.finished.calls, [("doc-second", 1, 2)])
         self.assertIs(window.large_doc_manager, manager)
+
+    def test_first_semantic_search_initializes_once_and_reuses_manager(self):
+        window = self._window()
+        window._current_lang = "en"
+        prompts = []
+        window._generate_gemini_text = lambda prompt, *_args, **_kwargs: prompts.append(prompt) or "answer"
+        manager = _RecordingManager()
+        messages = [{"role": "user", "content": "What is the result?"}]
+
+        with patch(
+            "large_doc_manager.LargeDocumentManager",
+            return_value=manager,
+        ) as constructor:
+            first = window.answer_question_gemini(
+                "unused-model",
+                messages,
+                "unused summary",
+                "fallback document text",
+                "api-key",
+                "doc-key",
+            )
+            second = window.answer_question_gemini(
+                "unused-model",
+                messages,
+                "unused summary",
+                "fallback document text",
+                "api-key",
+                "doc-key",
+            )
+
+        self.assertEqual((first, second), ("answer", "answer"))
+        constructor.assert_called_once_with("unused")
+        self.assertIs(window.large_doc_manager, manager)
+        self.assertEqual(
+            manager.retrieve_calls,
+            [
+                ("doc-key", "What is the result?", "api-key"),
+                ("doc-key", "What is the result?", "api-key"),
+            ],
+        )
+        self.assertEqual(len(prompts), 2)
+        self.assertTrue(all("Retrieved document context" in prompt for prompt in prompts))
+        self.assertTrue(all("fallback document text" not in prompt for prompt in prompts))
 
     def test_preinjected_manager_bypasses_lock_and_constructor(self):
         window = MainWindow.__new__(MainWindow)
