@@ -1,9 +1,13 @@
+import builtins
+import types
 import unittest
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from gemini_fallback import GEMINI_MODEL_FALLBACK_LABEL
 from gemini_gateway import GeminiCancelledError
 from main_window import MainWindow, _AnalysisWorker, _QAWorker
+from startup_helper import LoadingOverlayMixin
 
 
 class _Signal:
@@ -15,6 +19,53 @@ class _Signal:
 
 
 class OllamaRemovalTests(unittest.TestCase):
+    def test_active_runtime_and_ui_have_no_removed_offline_entrypoints(self):
+        root = Path(__file__).resolve().parent
+        active_files = (
+            "main.py",
+            "main_window.py",
+            "startup_helper.py",
+            "settings_window.py",
+            "ui_main_window.py",
+        )
+        forbidden = (
+            "import ollama",
+            "from ollama",
+            "offline_bootstrap",
+            "sourceComboBox",
+            "modelComboBox",
+            "refreshModelsButton",
+            "OFFLINE_SUMMARY_CHAR_CAP",
+            "nomic-embed-text",
+        )
+
+        for file_name in active_files:
+            source = (root / file_name).read_text(encoding="utf-8")
+            for token in forbidden:
+                with self.subTest(file=file_name, token=token):
+                    self.assertNotIn(token, source)
+
+    def test_startup_ready_path_does_not_import_offline_components(self):
+        statuses = []
+        window = types.SimpleNamespace(
+            _init_in_progress=True,
+            _hide_loading_overlay=lambda: None,
+            setEnabled=lambda enabled: statuses.append(("enabled", enabled)),
+            _set_status=lambda status: statuses.append(("status", status)),
+        )
+        real_import = builtins.__import__
+
+        def guarded_import(name, *args, **kwargs):
+            if name in {"ollama", "offline_bootstrap", "large_doc_manager"}:
+                raise AssertionError(f"startup imported removed/heavy component: {name}")
+            return real_import(name, *args, **kwargs)
+
+        with patch("builtins.__import__", side_effect=guarded_import):
+            LoadingOverlayMixin._on_init_finished(window)
+
+        self.assertFalse(window._init_in_progress)
+        self.assertEqual(statuses, [("enabled", True), ("status", "Ready")])
+
     def test_analysis_worker_always_uses_gemini_even_with_stale_provider_data(self):
         class Window:
             def __init__(self):
@@ -95,6 +146,30 @@ class OllamaRemovalTests(unittest.TestCase):
         self.assertEqual(window.classifications, [("What is the conclusion?", "gemini-2.5-flash", "captured-key")])
         self.assertEqual(window.answers, [("gemini-2.5-flash", messages, "summary", "document", "captured-key", "")])
         self.assertEqual(worker.finished.calls, [("answer", 5)])
+        self.assertEqual(worker.error.calls, [])
+
+    def test_qa_worker_cancellation_emits_no_result_or_error(self):
+        class Window:
+            def _classify_question_intent(self, *_args):
+                raise GeminiCancelledError("cancelled")
+
+            def answer_question_gemini(self, *_args):
+                raise AssertionError("Q&A must not continue after cancellation")
+
+        worker = _QAWorker(Window(), {
+            "model": "gemini",
+            "messages": [{"role": "user", "content": "Question?"}],
+            "summary": "summary",
+            "input_text": "document",
+            "gemini_key": "captured-key",
+            "doc_key": "doc-key",
+        }, 6)
+        worker.finished = _Signal()
+        worker.error = _Signal()
+
+        worker.run()
+
+        self.assertEqual(worker.finished.calls, [])
         self.assertEqual(worker.error.calls, [])
 
     def test_analysis_without_model_controls_requires_gemini_key(self):

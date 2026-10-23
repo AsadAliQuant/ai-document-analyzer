@@ -2463,6 +2463,8 @@ class PastedTextProcessWorker(QObject):
                 api_key=self.gemini_key,
             )
             self.finished.emit(self.doc_key, chunk_count, self.session_id)
+        except GeminiCancelledError:
+            return
         except Exception as e:
             self.error.emit(f"Processing failed: {str(e)}", self.session_id)
 

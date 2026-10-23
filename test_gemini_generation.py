@@ -162,6 +162,104 @@ class GeminiGenerationFallbackTests(unittest.TestCase):
         self.assertEqual(len(client.models.embedding_requests), 1)
         gateway.close()
 
+    def test_summary_uses_language_specific_prompt_and_captured_key(self):
+        for language in ("en", "ar"):
+            with self.subTest(language=language):
+                window = self._window()
+                window._current_lang = language
+                captured = {}
+
+                def generate(prompt, key, **kwargs):
+                    captured.update(prompt=prompt, key=key, **kwargs)
+                    return '{"summary": {"key_points": [], "methods": [], "conclusions": []}}'
+
+                window._generate_gemini_text = generate
+                result = window.summarize_text_gemini(
+                    "ignored-model",
+                    "Unique document body",
+                    "captured-key",
+                )
+
+                self.assertIn("Unique document body", captured["prompt"])
+                self.assertEqual(captured["key"], "captured-key")
+                self.assertEqual(result[:10], '{"summary"')
+                if language == "en":
+                    self.assertIn("Write the content in English", captured["prompt"])
+                    self.assertIn("expert summarizer", captured["system_instruction"])
+                else:
+                    self.assertNotIn("Write the content in English", captured["prompt"])
+                    self.assertTrue(any(ord(char) > 127 for char in captured["prompt"]))
+                    self.assertTrue(any(ord(char) > 127 for char in captured["system_instruction"]))
+
+    def test_qa_uses_document_context_history_and_selected_language(self):
+        messages = [
+            {"role": "user", "content": "Earlier question"},
+            {"role": "assistant", "content": "Earlier answer"},
+            {"role": "user", "content": "Current question"},
+        ]
+        for language in ("en", "ar"):
+            with self.subTest(language=language):
+                window = self._window()
+                window._current_lang = language
+                captured = {}
+
+                def generate(prompt, key, **kwargs):
+                    captured.update(prompt=prompt, key=key, **kwargs)
+                    return "answer"
+
+                window._generate_gemini_text = generate
+                answer = window.answer_question_gemini(
+                    "ignored-model",
+                    messages,
+                    "summary must not replace document text",
+                    "Unique source context",
+                    "captured-key",
+                )
+
+                self.assertEqual(answer, "answer")
+                self.assertEqual(captured["key"], "captured-key")
+                self.assertIn("Unique source context", captured["prompt"])
+                self.assertIn("Earlier question", captured["prompt"])
+                self.assertIn("Earlier answer", captured["prompt"])
+                self.assertIn("Current question", captured["prompt"])
+                self.assertNotIn("summary must not replace", captured["prompt"])
+                if language == "en":
+                    self.assertIn("Answer strictly based", captured["prompt"])
+                else:
+                    self.assertNotIn("Answer strictly based", captured["prompt"])
+                    self.assertTrue(any(ord(char) > 127 for char in captured["prompt"]))
+
+    def test_network_timeout_and_service_errors_are_safe_and_stable(self):
+        cases = (
+            (ConnectionError("network connection failed at secret.invalid"), "network", "Check your internet connection", False),
+            (TimeoutError("request timed out with token secret-token"), "timeout", "too long", False),
+            (_FakeApiError(503, "provider internals secret-token"), "service", "try again", True),
+        )
+        for raw_error, category, message_fragment, exhaust_fallbacks in cases:
+            with self.subTest(category=category):
+                failures = (
+                    {model: raw_error for model in GEMINI_MODEL_FALLBACKS}
+                    if exhaust_fallbacks
+                    else {GEMINI_MODEL_FALLBACKS[0]: raw_error}
+                )
+                client, fake_genai, fake_types = self._fake_sdk(
+                    failures
+                )
+                gateway = GeminiGateway("captured-key", client=client, types_module=fake_types)
+
+                with self.assertRaises(GeminiRequestError) as context:
+                    gateway.generate_text("prompt")
+
+                self.assertEqual(context.exception.category, category)
+                self.assertIn(message_fragment.lower(), str(context.exception).lower())
+                self.assertNotIn("secret", str(context.exception).lower())
+                self.assertEqual(
+                    len(client.models.requests),
+                    len(GEMINI_MODEL_FALLBACKS) if exhaust_fallbacks else 1,
+                )
+                gateway.close()
+                self.assertTrue(client.closed)
+
 
 if __name__ == "__main__":
     unittest.main()

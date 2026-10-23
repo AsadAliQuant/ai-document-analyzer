@@ -3,7 +3,15 @@ import unittest
 from unittest.mock import patch
 
 import main_window
-from main_window import MainWindow
+from main_window import MainWindow, _QAWorker
+
+
+class _Signal:
+    def __init__(self):
+        self.calls = []
+
+    def emit(self, *args):
+        self.calls.append(args)
 
 
 class _StoredDocumentManager:
@@ -81,6 +89,54 @@ class QuestionCountingTests(unittest.TestCase):
             intent,
             {"operation": "semantic_qa", "target": "", "unit": ""},
         )
+
+    def test_arabic_literal_count_uses_localized_response(self):
+        window = self._window("علامة علامة علامة")
+        window._current_lang = "ar"
+
+        result = window._handle_counting_intent({
+            "operation": "literal_occurrence_count",
+            "target": "علامة",
+            "unit": "",
+        })
+
+        self.assertIn("علامة", result)
+        self.assertIn("3", result)
+        self.assertNotIn("appears", result)
+
+    def test_counting_question_bypasses_semantic_qa(self):
+        class Window:
+            def _classify_question_intent(self, _question, _model, _key):
+                return {
+                    "operation": "literal_occurrence_count",
+                    "target": "TOKEN",
+                    "unit": "",
+                }
+
+            def _handle_counting_intent(self, _intent, _doc_key):
+                return 'The word/phrase "TOKEN" appears 4 times in the document.'
+
+            def answer_question_gemini(self, *_args):
+                raise AssertionError("semantic Q&A must not run for a count operation")
+
+        worker = _QAWorker(Window(), {
+            "model": "ignored-model",
+            "messages": [{"role": "user", "content": "How many TOKEN values?"}],
+            "summary": "summary",
+            "input_text": "TOKEN TOKEN TOKEN TOKEN",
+            "gemini_key": "captured-key",
+            "doc_key": "doc-key",
+        }, 11)
+        worker.finished = _Signal()
+        worker.error = _Signal()
+
+        worker.run()
+
+        self.assertEqual(
+            worker.finished.calls,
+            [('The word/phrase "TOKEN" appears 4 times in the document.', 11)],
+        )
+        self.assertEqual(worker.error.calls, [])
 
 
 if __name__ == "__main__":

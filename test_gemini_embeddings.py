@@ -115,6 +115,21 @@ class GeminiEmbeddingClientTests(unittest.TestCase):
         )
         self.assertIn("free-tier limit", str(error))
 
+    def test_missing_key_is_rejected_before_gateway_creation(self):
+        with patch.object(large_doc_manager, "GeminiGateway") as gateway:
+            with self.assertRaisesRegex(RuntimeError, "API key is required"):
+                GeminiEmbeddingClient("   ")
+        gateway.assert_not_called()
+
+    def test_network_and_timeout_errors_are_user_friendly(self):
+        for category in ("network", "timeout"):
+            with self.subTest(category=category):
+                error = GeminiEmbeddingClient._friendly_error(
+                    GeminiRequestError(category, "secret provider details")
+                )
+                self.assertIn("connect to the internet", str(error))
+                self.assertNotIn("secret", str(error))
+
     def test_cancellation_between_embedding_batches_stops_followup_requests(self):
         embedding_client, fake_client = self._embedding_client()
         with patch.object(

@@ -24,6 +24,12 @@ class _Manager:
         return 3
 
 
+class _CancellingManager:
+    def prepare_document(self, *_args, **_kwargs):
+        from gemini_gateway import GeminiCancelledError
+        raise GeminiCancelledError("cancelled")
+
+
 class _Window:
     def __init__(self, extracted_text="Exact\nOCR text", extraction_error=None):
         self.large_doc_manager = _Manager()
@@ -165,6 +171,18 @@ class DocumentProcessingWorkerTests(unittest.TestCase):
             [("paste-key", "pasted:paste-key", "pasted text", "api-key")],
         )
         self.assertEqual(worker.finished.calls, [("paste-key", 3, 9)])
+        self.assertEqual(worker.error.calls, [])
+
+    def test_pasted_text_cancellation_emits_no_result_or_error(self):
+        window = _Window()
+        window.large_doc_manager = _CancellingManager()
+        worker = PastedTextProcessWorker(window, "paste-key", "pasted text", "api-key", 10)
+        worker.finished = _Signal()
+        worker.error = _Signal()
+
+        worker.run()
+
+        self.assertEqual(worker.finished.calls, [])
         self.assertEqual(worker.error.calls, [])
 
 
