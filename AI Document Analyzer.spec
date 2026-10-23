@@ -40,19 +40,11 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
+    # Retained dependencies import these optional integrations. Keep them out
+    # even when they happen to be installed in the build environment.
     excludes=[
-        "easyocr",
         "sentence_transformers",
         "transformers",
-        "tokenizers",
-        "safetensors",
-        "torch",
-        "torchvision",
-        "cv2",
-        "skimage",
-        "scipy",
-        "sklearn",
-        "imageio",
     ],
     noarchive=False,
     optimize=0,

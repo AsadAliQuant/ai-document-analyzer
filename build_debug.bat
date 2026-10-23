@@ -29,6 +29,7 @@ if exist "%DIST_DIR%\%APP_NAME%.exe" del /F /Q "%DIST_DIR%\%APP_NAME%.exe"
 
 echo.
 echo [3/3] Building DEBUG executable with console window...
+REM Retained dependencies expose optional sentence-transformers/Transformers integrations.
 "%PYEXE%" -m PyInstaller --noconfirm --clean ^
     --name "%APP_NAME%" ^
     --onefile ^
@@ -48,18 +49,8 @@ echo [3/3] Building DEBUG executable with console window...
     --hidden-import=gemini_fallback ^
     --hidden-import=qdrant_client.local ^
     --hidden-import=portalocker ^
-    --exclude-module=easyocr ^
     --exclude-module=sentence_transformers ^
     --exclude-module=transformers ^
-    --exclude-module=tokenizers ^
-    --exclude-module=safetensors ^
-    --exclude-module=torch ^
-    --exclude-module=torchvision ^
-    --exclude-module=cv2 ^
-    --exclude-module=skimage ^
-    --exclude-module=scipy ^
-    --exclude-module=sklearn ^
-    --exclude-module=imageio ^
     main.py
 
 if %ERRORLEVEL% NEQ 0 (

@@ -43,6 +43,7 @@ REM Build EXE
 echo [2/2] Building EXE (this takes 15-25 minutes)...
 echo.
 
+REM Retained dependencies expose optional sentence-transformers/Transformers integrations.
 "%PYEXE%" -m PyInstaller --noconfirm --onefile --noconsole ^
     --name "AI Document Analyzer" ^
     --icon=assets\logo.ico ^
@@ -60,18 +61,8 @@ echo.
     --collect-all keyring ^
     --hidden-import keyring ^
     --hidden-import keyring.backends ^
-    --exclude-module easyocr ^
     --exclude-module sentence_transformers ^
     --exclude-module transformers ^
-    --exclude-module tokenizers ^
-    --exclude-module safetensors ^
-    --exclude-module torch ^
-    --exclude-module torchvision ^
-    --exclude-module cv2 ^
-    --exclude-module skimage ^
-    --exclude-module scipy ^
-    --exclude-module sklearn ^
-    --exclude-module imageio ^
     main.py
 
 if %ERRORLEVEL% NEQ 0 (
