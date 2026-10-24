@@ -1,6 +1,6 @@
 # Qdrant Migration Guide
 
-> **Current-state note (2026-10-16):** Qdrant still runs locally, but historical sentence-transformers or EasyOCR references below are superseded. Embeddings now use Gemini Embedding 2, and image transcription uses the Gemini 2.5 → 3.1 → 3.5 Flash-Lite fallback chain. See `LARGE_DOC_GUIDE.md`.
+> **Historical migration record — do not follow the commands below as current AI setup.** This document preserves the earlier ChromaDB/FAISS-to-Qdrant migration. Qdrant still runs locally, but the sentence-transformers and EasyOCR steps are superseded; the current application uses Gemini-only AI processing. See `README_Windows_Deployment.md` and `LARGE_DOC_GUIDE.md`.
 
 ## What Changed?
 

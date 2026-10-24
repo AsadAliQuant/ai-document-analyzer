@@ -28,11 +28,11 @@ echo [OK] Using Python: %PYEXE%
 "%PYEXE%" --version
 echo.
 
-REM Verify critical imports before building
-echo [1/2] Verifying RAG imports...
-"%PYEXE%" -c "from qdrant_client import QdrantClient; from google import genai; print('[OK] All RAG imports working')"
+REM Verify critical Gemini and Qdrant imports before building
+echo [1/2] Verifying Gemini/Qdrant imports...
+"%PYEXE%" -c "from qdrant_client import QdrantClient; from google import genai; print('[OK] Gemini/Qdrant imports working')"
 if %ERRORLEVEL% NEQ 0 (
-    echo [ERROR] RAG imports failed!
+    echo [ERROR] Gemini/Qdrant imports failed!
     echo         Run: %PYEXE% -m pip install -r requirements.txt
     pause
     exit /b 1
@@ -43,7 +43,7 @@ REM Build EXE
 echo [2/2] Building EXE (this takes 15-25 minutes)...
 echo.
 
-REM Retained dependencies expose optional sentence-transformers/Transformers integrations.
+REM Exclude optional transitive local-ML integrations; they are not supported AI providers.
 "%PYEXE%" -m PyInstaller --noconfirm --onefile --noconsole ^
     --name "AI Document Analyzer" ^
     --icon=assets\logo.ico ^

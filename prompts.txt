@@ -12,14 +12,23 @@ IMAGE OCR (gemini_ocr.py)
 
 DOCUMENT SUMMARIZATION (main_window.py)
 - Return strict JSON with key_points, methods, and conclusions.
-- Summarize only the supplied document text.
-- Image summaries receive the stored Gemini OCR transcription, not image bytes.
+- Summarize only the supplied document context.
+- Image summaries receive stored Gemini OCR transcription, not image bytes.
+
+QUESTION INTENT AND EXACT COUNTING (main_window.py)
+- Use Gemini to classify literal counts, structural counts, or semantic Q&A.
+- Perform classified exact counts locally against complete stored document text.
 
 DOCUMENT Q&A (main_window.py)
-- Answer only from document context and previous conversation.
-- Use Qdrant-retrieved passages for semantic questions.
-- Use complete raw extracted text for exact counting.
+- Answer only from document context and applicable previous conversation.
+- Use Gemini Embedding 2 and local Qdrant retrieval for semantic questions.
+- Send retrieved passages, the question, and applicable history to Gemini.
 
-Privacy: the complete image is sent to Google Gemini for OCR. Image OCR and
-Gemini Embedding 2 require a Gemini API key, internet access, and available API
-quota even when Ollama performs final summary or Q&A generation.
+PRIVACY AND REQUIREMENTS
+- Complete images are sent to Gemini for OCR.
+- Extracted chunks are sent to Gemini Embedding 2 for indexing.
+- Selected context is sent for summaries; questions, retrieved passages, and
+  applicable conversation history are sent for semantic Q&A.
+- Extracted text, chunks, vectors, and cached indexes remain in local Qdrant.
+- Supported AI stages require a Gemini API key, internet access, and available
+  quota. Local Qdrant persistence does not provide offline AI inference.

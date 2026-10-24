@@ -29,7 +29,7 @@ if exist "%DIST_DIR%\%APP_NAME%.exe" del /F /Q "%DIST_DIR%\%APP_NAME%.exe"
 
 echo.
 echo [3/3] Building DEBUG executable with console window...
-REM Retained dependencies expose optional sentence-transformers/Transformers integrations.
+REM Exclude optional transitive local-ML integrations; they are not supported AI providers.
 "%PYEXE%" -m PyInstaller --noconfirm --clean ^
     --name "%APP_NAME%" ^
     --onefile ^

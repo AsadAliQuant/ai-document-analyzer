@@ -2,7 +2,7 @@
 
 ## Overview
 
-AI Document Analyzer is a PyQt6 desktop application for document summarization, RAG-powered Q&A, and exact counting. It supports Google Gemini and optional Ollama generation models.
+AI Document Analyzer is a PyQt6 desktop application for Gemini-powered document summarization, RAG Q&A, exact counting, image transcription, and semantic embeddings. Gemini is the only supported AI provider. Qdrant stores document indexes locally; it is not a local AI model or offline inference provider.
 
 ## Requirements
 
@@ -18,20 +18,31 @@ AI Document Analyzer is a PyQt6 desktop application for document summarization, 
 ### End users
 
 - No Python installation for packaged builds
-- A Gemini API key and internet connection for document embeddings
-- A Gemini API key and internet connection for new PNG/JPG/JPEG OCR
-- Ollama installed and running only when using Ollama for final summary/Q&A generation
+- A Gemini API key entered through the application's Settings dialog
+- Internet access and available Gemini quota for OCR, embeddings, summaries, question classification, and semantic Q&A
+
+Exact-count calculations run locally against stored document text after Gemini classifies the question.
 
 ## Privacy and online processing
 
-- The full uploaded image is sent to Gemini 2.5 Flash-Lite for OCR. If that model is unavailable, the app tries Gemini 3.1 Flash-Lite and then Gemini 3.5 Flash-Lite.
-- Extracted chunks are sent to Gemini Embedding 2 to create vectors.
-- Qdrant and its vector/index files remain local under `%APPDATA%/AI Document Analyzer/vector_store/`.
-- Gemini quota or billing rules may apply.
-- Selecting Ollama keeps final text generation local, but new image OCR and all new document embeddings still depend on Gemini.
-- Scanned-PDF OCR is not supported in this release.
+The application sends the following content to Google Gemini:
 
-Unchanged Gemini-processed images reuse their local index and do not require another OCR request. Old EasyOCR caches are left untouched and can be deleted manually from `%APPDATA%/AI Document Analyzer/models/easyocr/` if desired.
+- The complete PNG/JPG/JPEG image bytes for OCR.
+- Extracted document chunks for Gemini Embedding 2 indexing.
+- Selected document context for summary generation.
+- The current question, retrieved document passages, and applicable conversation history for semantic Q&A.
+- The question text for count-versus-semantic intent classification.
+
+Gemini generation requests automatically try `gemini-2.5-flash-lite`, then `gemini-3.1-flash-lite`, then `gemini-3.5-flash-lite` when the current model is unavailable. Authentication, quota, validation, and other client errors do not advance to another model. Gemini quota or billing rules may apply.
+
+The following data remains local:
+
+- Source files are read from the user's computer.
+- Extracted text, ordered chunks, vectors, embedding metadata, and Qdrant files are stored under `%APPDATA%/AI Document Analyzer/vector_store/`.
+- Exact-count calculations read the complete stored text locally after Gemini classifies the question.
+- Unchanged Gemini-processed images can reuse their versioned local index, avoiding another OCR upload.
+
+Local persistence does not make AI processing offline. Scanned-PDF OCR is not supported in this release. Upgraded installations may retain obsolete EasyOCR data under `%APPDATA%/AI Document Analyzer/models/easyocr/`; the application no longer loads or recreates those weights, so they may be deleted manually.
 
 ## Supported inputs
 
@@ -49,65 +60,78 @@ py -3.11 -m venv .venv311
 .venv311\Scripts\python.exe main.py
 ```
 
-Add the Gemini API key through the application's Settings dialog.
+Before testing an AI workflow, add the Gemini API key through Settings and confirm that the computer has internet access.
 
 ## Build commands
 
 ```bat
-REM Recommended single-file build with import checks
-build_exe.bat
-
-REM One-folder build for faster packaging iteration
+REM Canonical one-folder build used as the NSIS installer input
 build_folder.bat
 
-REM Single-file build driven by app.spec
+REM Alternate single-file build with Gemini/Qdrant import checks
+build_exe.bat
+
+REM Alternate single-file build driven by app.spec
 build_complete.bat
 
-REM Console-enabled diagnostic build
+REM Console-enabled diagnostic single-file build
 build_debug.bat
 ```
 
-Build from a clean Python 3.11 environment. Do not reuse an environment merely because removed OCR/ML packages remain installed there.
+The canonical release path is:
 
-## Clean-build acceptance checks
+```text
+build_folder.bat
+    → app_folder.spec
+    → dist\AI Document Analyzer\
+    → installer.nsi
+    → AI_Document_Analyzer_Setup.exe
+```
 
-1. Install the updated requirements.
-2. Run `python -m pip check`.
-3. Run all unit tests.
-4. Build and test the one-folder artifact.
-5. Build and test the single-file artifact.
-6. Confirm the output does not contain EasyOCR, Torch, torchvision, OpenCV, scikit-image, SciPy, scikit-learn, old OCR weights, or `offline_bootstrap`.
-7. Test English, Arabic, mixed-language, table, blank, damaged, missing-key, invalid-key, offline, quota, and model-unavailable image cases.
-8. Test PDF, DOCX, TXT, pasted text, Gemini summaries, Ollama summaries, Q&A, and exact counting.
-9. Measure artifact size and cold-start time on a clean Windows account before publishing claims.
+Run NSIS against `installer.nsi` only after creating the one-folder output. The retained single-file scripts do not create the NSIS installer. Build from a clean Python 3.11 environment; do not rely on a development environment merely because obsolete OCR or local-ML packages remain installed there.
+
+## Release acceptance checklist (Task 13)
+
+The following checks describe the later final acceptance gate; their presence here is not evidence that the clean build has already passed:
+
+1. Install the current requirements in a clean Python 3.11 environment.
+2. Run `python -m pip check` and the complete unit-test suite.
+3. Build and test the canonical one-folder artifact.
+4. Inspect the package for Ollama, offline bootstrap/model payloads, EasyOCR, Torch, torchvision, OpenCV, scikit-image, SciPy, scikit-learn, and obsolete OCR weights.
+5. Test Gemini summary, Q&A, OCR, embeddings/RAG, exact counting, English/Arabic behavior, missing or invalid keys, no-network/timeout handling, quota, model availability, cancellation, and worker cleanup.
+6. Measure artifact size and cold-start time on a clean Windows account before publishing performance claims.
+
+Final clean-build execution, package inspection, smoke testing, and updated measurements belong to Milestone 1 Task 13.
 
 ## Output
 
-- Single-file: `dist\AI Document Analyzer.exe`
-- One-folder: `dist\AI Document Analyzer\`
-- Installer output depends on `installer.nsi`
+- Canonical one-folder package and NSIS input: `dist\AI Document Analyzer\`
+- NSIS installer: `AI_Document_Analyzer_Setup.exe` after compiling `installer.nsi`
+- Alternate single-file package: `dist\AI Document Analyzer.exe`
 
-## Latest local measurements
+## Task 3 pre-removal baseline
 
-Measured on Windows 10 on October 20, 2026 from the existing `.venv311` environment:
+The following measurements were recorded on Windows 10 on October 20, 2026 as the Task 3 baseline, before the later offline-provider removal work. They must not be treated as final post-removal package measurements:
 
-- Current canonical one-folder package: 217.41 MiB (`227,968,502` bytes) across 1,576 files and 252 directories. EXE SHA-256: `4ABB0562A605DF0A3E097BD60D579E447AE12F1658BC6B820501B77F6C89EFC5`.
-- Qdrant/NumPy are excluded from startup and initialized lazily on first document/RAG use.
-- Genuine first packaged launch after reboot: `WaitForInputIdle` 10.636 seconds and visible Ready 11.050 seconds. Visible Ready means the loading overlay is absent, the main window and Analyze control are enabled, and `Status: Ready` is visible.
+- One-folder package: 217.41 MiB (`227,968,502` bytes) across 1,576 files and 252 directories. EXE SHA-256: `4ABB0562A605DF0A3E097BD60D579E447AE12F1658BC6B820501B77F6C89EFC5`.
+- Qdrant/NumPy were excluded from startup and initialized lazily on first document/RAG use.
+- Genuine first packaged launch after reboot: `WaitForInputIdle` 10.636 seconds and visible Ready 11.050 seconds. Visible Ready meant the loading overlay was absent, the main window and Analyze control were enabled, and `Status: Ready` was visible.
 - Five accepted warm launches: `WaitForInputIdle` median 5.420 seconds and visible-Ready median 5.472 seconds. All five reached Ready and exited normally.
-- Package inspection found no EasyOCR, Hugging Face Transformers, sentence-transformers, Torch, torchvision, OpenCV, scikit-image, SciPy, scikit-learn, ImageIO, `offline_bootstrap`, or local model-weight payloads. Google Gen AI and LangChain modules containing `transformers` in their filenames are expected helper-name collisions.
-- Earlier single-file measurement before the SDK consolidation: 105.48 MiB, with 10.91 seconds on the first run and 5.70/6.51 seconds on subsequent runs. Rebuild before relying on this historical single-file figure.
+- That package inspection found no EasyOCR, Hugging Face Transformers, sentence-transformers, Torch, torchvision, OpenCV, scikit-image, SciPy, scikit-learn, ImageIO, `offline_bootstrap`, or local model-weight payloads. Google Gen AI and LangChain modules containing `transformers` in their filenames were expected helper-name collisions.
+- An earlier single-file measurement before SDK consolidation was 105.48 MiB, with 10.91 seconds on the first run and 5.70/6.51 seconds on subsequent runs.
 
-These are local development-machine measurements, not clean-account or end-user benchmarks. Repeat the acceptance checks on a clean Windows account before publishing performance claims.
+These are historical development-machine measurements. Task 13 must rebuild and repeat the measurements before current performance claims are published.
 
 ## Troubleshooting
 
-- **Gemini key missing or rejected:** update the key in Settings.
-- **Image OCR cannot connect or times out:** check internet access and retry.
-- **Quota reached:** wait for quota reset or inspect Google API billing/quota.
-- **OCR models unavailable:** verify access to at least one configured model: Gemini 2.5, 3.1, or 3.5 Flash-Lite.
-- **No readable image text:** try a clearer PNG/JPG/JPEG.
-- **Ollama unavailable:** install/start Ollama and select a chat model.
-- **File extraction error:** verify that the document is readable and not password protected.
+- **Gemini key missing:** add the Gemini API key in Settings, then retry.
+- **Gemini key rejected:** verify the key in Google AI Studio and replace it in Settings.
+- **Network failure or timeout:** internet access is required for OCR, indexing, summaries, question classification, and semantic Q&A. Check the connection and retry.
+- **Quota reached:** wait for quota reset or inspect the Google API billing/quota configuration.
+- **Generation models unavailable:** confirm the account can access at least one configured Flash-Lite model. The app tries Gemini 2.5, 3.1, and 3.5 Flash-Lite only for model-availability/server failures.
+- **Embedding or indexing failed:** verify the key, network, and Gemini Embedding 2 access, then process the document again.
+- **Qdrant initialization or storage failed:** verify that `%APPDATA%/AI Document Analyzer/` is writable and has sufficient disk space, then restart the application.
+- **File extraction failed:** verify that the document is supported, readable, and not password protected.
+- **No readable image text:** use an undamaged PNG/JPG/JPEG with clearer visible text.
 
 Application data and logs are stored under `%APPDATA%/AI Document Analyzer/`.

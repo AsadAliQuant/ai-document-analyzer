@@ -1,6 +1,6 @@
 # Python Version Compatibility Guide
 
-> **Current-state note (2026-10-16):** Any EasyOCR, Torch, local OCR model, or sentence-transformers instructions below are historical and superseded. Image transcription now uses the Gemini 2.5 → 3.1 → 3.5 Flash-Lite fallback chain, embeddings use Gemini Embedding 2, and Qdrant remains local. See `LARGE_DOC_GUIDE.md`.
+> **Historical migration record — do not follow the commands below for current setup.** This document preserves an earlier Python/Qdrant/EasyOCR migration and contains superseded local OCR, Torch, and sentence-transformers instructions. The current application uses Gemini-only AI processing with local Qdrant persistence. See `README_Windows_Deployment.md` and `LARGE_DOC_GUIDE.md` for current setup and privacy guidance.
 
 ## Current Vector Store: Qdrant
 

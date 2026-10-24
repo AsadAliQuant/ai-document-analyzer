@@ -1,5 +1,7 @@
 # Fix: App Required Admin to Run (UAC Elevation)
 
+> **Historical fix record:** This document describes the 2026-05-31 application state. References to local model downloads are historical; the current application no longer supports local AI models. The UAC diagnosis, AppData behavior, and manifest fix remain applicable.
+
 **Chat reference:** Claude Code session — branch `AfterPhase2Completed`, 2026-05-31
 
 ## Problem

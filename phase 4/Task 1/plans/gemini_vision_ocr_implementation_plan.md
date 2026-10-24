@@ -1,8 +1,10 @@
 # Gemini Vision OCR Migration — Detailed Implementation Plan
 
+> **Historical implementation plan:** This records the transitional Task 2 design. Later Tasks 5–11 removed Ollama and local-model dispatch, established the shared Gemini gateway, and made Gemini the only AI provider. Preserve the original transitional assumptions below as history rather than current guidance.
+
 ## Objective
 
-> **Current-state note (2026-10-16):** The later fallback requirement supersedes this plan's fixed-model/no-fallback language. OCR, Gemini summaries, and Gemini Q&A now try `gemini-2.5-flash-lite`, `gemini-3.1-flash-lite`, then `gemini-3.5-flash-lite` when the current model is unavailable.
+> **Supersession note (2026-10-24):** The later fallback requirement supersedes this plan's fixed-model/no-fallback language. OCR, Gemini summaries, intent classification, and Gemini Q&A now try `gemini-2.5-flash-lite`, `gemini-3.1-flash-lite`, then `gemini-3.5-flash-lite` when the current model is unavailable.
 
 Replace the application's local EasyOCR image-to-text implementation with Gemini image understanding while preserving the existing document-processing pipeline, local Qdrant storage, summaries, Q&A, exact counting, and image caching.
 

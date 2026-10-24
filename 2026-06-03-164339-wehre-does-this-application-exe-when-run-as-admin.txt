@@ -1,3 +1,8 @@
+HISTORICAL SESSION TRANSCRIPT (2026-06-03)
+This transcript is preserved verbatim below as historical evidence. References to
+models/, offline_bootstrap, or local AI models describe removed behavior and are
+not current setup or storage guidance. See README_Windows_Deployment.md instead.
+
  ▐▛███▜▌   Claude Code v2.1.153
 ▝▜█████▛▘  Opus 4.7 · Claude Pro
   ▘▘ ▝▝    F:\Asad\Talha Projects\ai-document-analyzer
