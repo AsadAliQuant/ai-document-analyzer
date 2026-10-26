@@ -1,5 +1,7 @@
 # Phase 4 / Milestone 1 / Task 5 — Gemini-Only Feature Dispatch Plan
 
+> **Historical completed-task plan.** Transitional Ollama/UI references describe the state before Tasks 6–9 and are not current instructions. The active application is Gemini-only and retains local Qdrant. Use `README_Windows_Deployment.md`, `LARGE_DOC_GUIDE.md`, and `CLAUDE.md` for current guidance.
+
 ## Objective
 
 Consolidate document summarization, Q&A, OCR, and embedding requests behind one Gemini-only application path. Keep feature logic independent of the current user-entered API key and Google SDK transport so Milestone 2 can replace that boundary with the admin-managed backend gateway without rewriting those features.

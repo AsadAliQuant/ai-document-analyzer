@@ -4,6 +4,11 @@ dist/
 .git/
 ai-document-analyzer_AfterPhase2Delivered/
 
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+
 # Virtual environments
 .venv/
 .venv*/

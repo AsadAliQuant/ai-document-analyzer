@@ -1,5 +1,7 @@
 # AI Document Analyzer - Online-Only Architecture Design
 
+> **Historical/superseded planning record.** This document predates the accepted Gemini-only Milestone 1 architecture and is not current implementation or setup guidance. The application retains local Qdrant but has no Ollama or local-inference path. Use `README_Windows_Deployment.md`, `LARGE_DOC_GUIDE.md`, and `CLAUDE.md` for current guidance.
+
 Based on my comprehensive codebase exploration, I'll now design a lightweight, online-only architecture for your AI Document Analyzer.
 
 ## Architecture Analysis Complete

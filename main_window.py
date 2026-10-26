@@ -43,6 +43,16 @@ from license_manager import LicenseManager
 from license_overlay import LicenseOverlay
 from auth import AuthState, clear_tokens
 
+
+def _asset_path(*parts) -> str:
+    """Resolve resources for source runs and PyInstaller packages."""
+    if getattr(sys, "frozen", False):
+        base_dir = getattr(sys, "_MEIPASS", None) or os.path.dirname(sys.executable)
+    else:
+        base_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(base_dir, *parts)
+
+
 # Windows theme detection
 def is_windows_dark_mode() -> bool:
     """Detect if Windows is in dark mode via registry."""
@@ -125,7 +135,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         if QSystemTrayIcon.isSystemTrayAvailable():
             self.tray_icon = QSystemTrayIcon(self)
             try:
-                self.tray_icon.setIcon(QIcon("assets/logo.png"))
+                self.tray_icon.setIcon(QIcon(_asset_path("assets", "logo.png")))
             except Exception:
                 pass
             self.tray_icon.setVisible(True)

@@ -83,13 +83,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
     app.setWindowIcon(QIcon(_asset_path("assets", "app-icon-logo.jpeg")))
-    # Load global light stylesheet if present
-    try:
-        with open("styles.qss", "r", encoding="utf-8") as f:
-            app.setStyleSheet(f.read())
-    except Exception:
-        pass
-    
+
     # Resolve API base URL and attempt silent sign-in via refresh token
     api_base = _load_api_base_url()
     signed_in = False

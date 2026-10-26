@@ -1,5 +1,7 @@
 # EXE Size and Startup Optimization Summary
 
+> **Historical pre-implementation estimate.** The alternatives and size/startup targets below are not current setup guidance or accepted measurements. Milestone 1 standardized on Gemini-only AI with retained local Qdrant. Use `README_Windows_Deployment.md`, `LARGE_DOC_GUIDE.md`, and `CLAUDE.md` for current behavior and measured results.
+
 ## Short Summary
 
 | Priority | What to do | Expected benefit |
