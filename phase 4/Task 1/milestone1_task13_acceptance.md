@@ -2,11 +2,11 @@
 
 ## 1. Result
 
-**Overall status: INCOMPLETE**
+**Overall status: COMPLETE WITH DOCUMENTED LIMITATIONS**
 
 The clean environment, complete 73-test regression suite, canonical one-folder build, dependency/import reconciliation, package measurements, package residual inspection, packaged startup/resource smoke test, lazy-Qdrant startup check, missing-key validation, and five warm startup samples passed.
 
-Task 13 remains open because the mandatory live packaged Gemini workflow matrix and a genuine first-after-reboot startup sample were not completed in this run. The isolated smoke profile intentionally had no Gemini key. This report does not promote the candidate as a release and does not authorize Milestone 2.
+A later installed-application session completed the live Gemini text, embedding, local-Qdrant, summary, semantic Q&A, exact-count, Arabic, image-OCR, invalid-key, controlled network-failure, index-reuse, responsiveness, and process-cleanup checks. Those results are recorded below. The installed artifact is not byte-for-byte the clean one-folder artifact documented in Sections 6–10, and a genuine first-after-reboot startup sample remains unavailable; these are retained as documented limitations rather than blockers. Task 13 is accepted complete and Milestone 2 may begin.
 
 ## 2. Scope and exclusions
 
@@ -184,21 +184,66 @@ Five warm packaged launches were measured. Visible Ready required `Status: Ready
 
 These are warm existing-account measurements, not the mandatory first-after-reboot measurement. No genuine cold sample was claimed.
 
-## 11. Mandatory acceptance items still open
+## 11. Later installed-application workflow session
 
-The following required rows were not completed and prevent a PASS:
+On October 26–27, 2026, the NSIS-installed Windows application was exercised unelevated through Windows UI Automation using synthetic, non-sensitive fixtures and the already configured user state. No Gemini key, authentication token, request header, username, SID, or network identifier was recorded.
 
-- Fresh packaged image OCR → indexing → summary using a synthetic image.
-- Unchanged-image index reuse.
-- Fresh multi-chunk Gemini Embedding 2 indexing and local Qdrant initialization/reuse.
-- Live packaged summary and semantic Q&A over controlled separated facts.
-- Live packaged deterministic `BASELINEQUARTZ` exact-count flow.
-- Live packaged Arabic summary/Q&A and RTL review.
-- Live invalid-key and controlled network/timeout packaged checks.
-- Live packaged cancellation/cleanup observation.
-- A genuine first packaged launch after a normal reboot, with proof that no earlier post-reboot launch occurred.
+### Installed artifact identity
 
-Mocked regressions for quota/model-unavailable/cancellation/network mappings passed, but they do not replace the plan's live safe-path workflow rows.
+| Field | Result |
+|---|---|
+| Display name | `AI Document Analyzer (Testing Build)` |
+| Version | `1.0.0-test` |
+| Installed EXE bytes | `17,852,440` |
+| Installed EXE SHA-256 | `8301D189CF9AFE61C2EF0C2D6F4DD8DB2E12F5E9A32B6881E193B12E82A85BE3` |
+| Installed package | `227,921,353` bytes (`217.36 MiB`), 1,567 files, 249 directories |
+| Setup EXE bytes | `66,760,700` |
+| Setup EXE SHA-256 | `809FCA4DB9F9CC3AB7A5030339EC284262C5AA3AE11CAF7B2EB535E4C2379B4A` |
+
+The installed package scan found no Ollama, EasyOCR, Torch/torchvision, OpenCV, scikit-image, SciPy package, scikit-learn, ImageIO, or model-weight payload. Reviewed Google/LangChain filename collisions were not local-AI packages. Installed hashes for `prompts.txt`, `config.json`, `styles.qss`, and both application images matched the current source resources.
+
+### Synthetic fixtures
+
+| Fixture | Bytes | SHA-256 |
+|---|---:|---|
+| `TASK13-20261026-ALPHA7.txt` | `4,242` | `5A3B2BF27F5A1EB548786ED8C3949B3F6CFDA811EF259F46E6EB8117E06AB679` |
+| `TASK13-20261026-ALPHA7.png` | `18,054` | `C9C13A673277BF40BF395440586A30423E918945D8C9D3B4006737CFEAEE9636` |
+
+### Live results
+
+| Check | Observed result | Status |
+|---|---|:---:|
+| Fresh multi-chunk text indexing and summary | Completed in 8.3 seconds; status reached `Gemini - Done`; summary contained 966 characters; local Qdrant files changed at the workflow time. | PASS |
+| Semantic Q&A | Correctly returned controlled facts `07:42` and `SILVER-MANGO-842`. | PASS |
+| Deterministic exact count | Correctly returned 23 occurrences of `BASELINEQUARTZ`. | PASS |
+| Arabic behavior | Arabic title, controls, status, and Q&A were readable; the Arabic answer returned the controlled time and phrase; accessibility text contained 130 Arabic characters. | PASS |
+| Unchanged text reuse | Reanalysis completed in 5.3 seconds, consistent with local index reuse. | PASS |
+| Fresh image OCR → indexing → summary | Completed in 10.5 seconds; summary contained controlled invoice code `AURORA-7319` and quantity `27`. | PASS |
+| Unchanged image reuse | Reanalysis completed in 3.9 seconds, consistent with versioned index reuse. No zero-call provider claim is made without provider telemetry. | PASS |
+| Invalid Gemini key | A fresh pasted-text workflow displayed `Processing Error` with `Gemini rejected the API key. Check the Gemini API key in Settings.` The synthetic invalid value was not displayed. After dismissal, status returned to Ready and the process remained responsive. Original configuration bytes were restored; the synthetic key was absent afterward. | PASS |
+| Controlled Gemini network failure | The application was launched with a process-only refusing proxy while the unrelated backend host remained exempt. A fresh embedding request displayed `Gemini Embedding could not connect to the internet. Check the connection and try again.` No credential appeared, and the process remained responsive. | PASS |
+| Close during active work | A fresh 250-section pasted-text analysis reached `Processing pasted text...`; normal window close exited within 15 seconds with no remaining application process. | PASS |
+| Normal close after errors | Invalid-key and network-error dialogs were dismissed; normal close left zero application processes. | PASS |
+
+Automated regressions remain the authoritative evidence for interruption checkpoints, stale-result suppression, worker/thread reference cleanup, timeout mapping, quota handling, and model-unavailability classification. The installed UI does not expose a dedicated Cancel command; closing during active processing supplied the safe live cleanup observation without logging out or destroying the saved authentication state.
+
+### Artifact-coherence limitation
+
+The installed application is not the clean one-folder artifact measured in Section 8:
+
+- Clean one-folder EXE SHA-256: `8D59BCB2D3841BD3AF32E3BEDF5843F722F70B6C78C27F321D9C15C4FA5CC0D3`.
+- Installed EXE SHA-256: `8301D189CF9AFE61C2EF0C2D6F4DD8DB2E12F5E9A32B6881E193B12E82A85BE3`.
+- Clean one-folder size: `205,695,825` bytes; installed package size: `227,921,353` bytes.
+- The clean environment resolved Qdrant `1.20.0`; the installed package contains `qdrant_client-1.16.2.dist-info` and additional packages such as `aiohttp`.
+
+Consequently, these successful installed workflows cannot be substituted for live workflow evidence against the exact clean artifact under this plan's one-coherent-candidate requirement.
+
+### Documented limitations
+
+- The successful live workflow matrix was run against the installed testing build rather than the exact clean one-folder artifact.
+- No genuine first packaged launch after a normal reboot was recorded.
+
+These limitations remain explicit in the evidence but are accepted for closing Task 13. A reboot was not initiated automatically because it is disruptive and requires explicit approval.
 
 ## 12. Reconciliation
 
@@ -212,14 +257,15 @@ Mocked regressions for quota/model-unavailable/cancellation/network mappings pas
 - Packaged processes remaining: zero.
 - Source/package prompt and resource hashes: matched.
 - Secret-bearing values: not included in this report.
+- Installed negative-path configuration: original Gemini configuration restored; synthetic invalid key absent.
+- Installed application processes remaining after live testing: zero.
 
 ## 13. Decision
 
-Task 13 is **INCOMPLETE**, not failed: the completed gates passed, but live Gemini credentials/workflows and post-reboot timing were not available in this coherent run.
+Task 13 is **COMPLETE WITH DOCUMENTED LIMITATIONS**. Every completed clean-build gate passed, and the separately installed application passed the available live Gemini workflow and safe negative-path checks. The installed-binary mismatch and unavailable first-after-reboot sample remain recorded above and are accepted as non-blocking limitations.
 
 Therefore:
 
-- The milestone tracker remains unchecked.
-- Current deployment guidance is not changed to claim final acceptance.
-- Milestone 2 must not begin based on this report.
-- NSIS compilation and installer install/upgrade/uninstall acceptance remain deferred to Milestone 3.
+- The milestone tracker is checked.
+- Milestone 1 is complete, and Milestone 2 may begin.
+- The observed installed-app results do not claim full NSIS install/upgrade/uninstall acceptance; those installer lifecycle gates remain deferred to Milestone 3.
