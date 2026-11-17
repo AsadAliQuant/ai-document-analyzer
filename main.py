@@ -3,6 +3,8 @@ import sys
 import faulthandler
 import json
 
+from backend_api import DEFAULT_API_BASE_URL, resolve_api_base_url
+
 # Limit native-library worker threads before document-processing imports.
 os.environ.setdefault("OMP_NUM_THREADS", "1")
 
@@ -32,9 +34,6 @@ from PyQt6.QtGui import QIcon
 from main_window import MainWindow
 from auth import refresh as auth_refresh, get_stored_refresh_token
 
-DEFAULT_API_BASE_URL = "https://ssma.sa/console/api"
-
-
 def _asset_path(*parts) -> str:
     """Resolve a path under the bundled assets dir for both source runs and PyInstaller EXEs."""
     if getattr(sys, "frozen", False):
@@ -45,38 +44,8 @@ def _asset_path(*parts) -> str:
 
 
 def _load_api_base_url() -> str:
-    # 1. Prefer user-specific config in %APPDATA% if present
-    try:
-        appdata = os.getenv("APPDATA") or os.path.expanduser("~")
-        cfg_dir = os.path.join(appdata, "AI Document Analyzer")
-        cfg_path = os.path.join(cfg_dir, "config.json")
-        if os.path.exists(cfg_path):
-            with open(cfg_path, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            base = cfg.get("API_BASE_URL")
-            if base:
-                return str(base).rstrip("/")
-    except Exception:
-        pass
-    # 2. Check bundled config.json inside PyInstaller _MEIPASS (--onefile extracts here)
-    try:
-        bundled_cfg = _asset_path("config.json")
-        if os.path.exists(bundled_cfg):
-            with open(bundled_cfg, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            base = cfg.get("API_BASE_URL")
-            if base:
-                return str(base).rstrip("/")
-    except Exception:
-        pass
-    # 3. Fallback to config.json in CWD (development runs)
-    try:
-        with open("config.json", "r", encoding="utf-8") as f:
-            cfg = json.load(f)
-        base = cfg.get("API_BASE_URL") or DEFAULT_API_BASE_URL
-        return str(base).rstrip("/")
-    except Exception:
-        return DEFAULT_API_BASE_URL
+    """Compatibility wrapper over the shared backend URL resolver."""
+    return resolve_api_base_url()
 
 
 if __name__ == "__main__":

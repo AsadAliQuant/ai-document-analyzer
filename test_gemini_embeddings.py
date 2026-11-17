@@ -65,14 +65,18 @@ class _FakeSdk:
 
 class GeminiEmbeddingClientTests(unittest.TestCase):
     def _embedding_client(self):
-        fake_client = _FakeClient()
-        with patch.object(
-            large_doc_manager,
-            "GeminiGateway",
-            lambda key: GeminiGateway(key, sdk=_FakeSdk(fake_client), types_module=_FakeTypes),
-        ):
-            client = GeminiEmbeddingClient("test-key")
-        return client, fake_client
+        fake_gateway = unittest.mock.Mock()
+        fake_gateway.embed_contents.side_effect = lambda contents, output_dimension: type(
+            "Response",
+            (),
+            {"embeddings": [
+                _FakeEmbedding([float(index)] * output_dimension)
+                for index, _content in enumerate(contents)
+            ]},
+        )()
+        with patch.object(large_doc_manager, "GeminiGateway", return_value=fake_gateway):
+            client = GeminiEmbeddingClient()
+        return client, fake_gateway
 
     def test_documents_are_sent_as_separate_content_objects(self):
         embedding_client, fake_client = self._embedding_client()
@@ -84,11 +88,12 @@ class GeminiEmbeddingClientTests(unittest.TestCase):
 
         self.assertEqual(len(vectors), 2)
         self.assertEqual(len(vectors[0]), GeminiEmbeddingClient.DIMENSION)
-        model, contents, config = fake_client.models.requests[0]
-        self.assertEqual(model, "gemini-embedding-2")
-        self.assertEqual(len(contents), 2)
-        self.assertEqual(config.output_dimensionality, 768)
-        self.assertEqual(contents[0].parts[0].text, "title: example.pdf | text: first chunk")
+        contents, dimension = fake_client.embed_contents.call_args.args
+        self.assertEqual(dimension, 768)
+        self.assertEqual(contents, [
+            "title: example.pdf | text: first chunk",
+            "title: example.pdf | text: second chunk",
+        ])
 
     def test_query_uses_question_answering_instruction(self):
         embedding_client, fake_client = self._embedding_client()
@@ -96,30 +101,39 @@ class GeminiEmbeddingClientTests(unittest.TestCase):
         vector = embedding_client.embed_query("What is the conclusion?")
 
         self.assertEqual(len(vector), GeminiEmbeddingClient.DIMENSION)
-        _model, contents, _config = fake_client.models.requests[0]
-        self.assertEqual(
-            contents[0].parts[0].text,
-            "task: question answering | query: What is the conclusion?",
-        )
+        contents, dimension = fake_client.embed_contents.call_args.args
+        self.assertEqual(dimension, 768)
+        self.assertEqual(contents, ["task: question answering | query: What is the conclusion?"])
 
-    def test_close_releases_sdk_client(self):
-        embedding_client, fake_client = self._embedding_client()
+    def test_close_releases_gateway(self):
+        embedding_client, fake_gateway = self._embedding_client()
 
         embedding_client.close()
 
-        self.assertTrue(fake_client.closed)
+        fake_gateway.close.assert_called_once()
 
     def test_rate_limit_error_is_user_friendly(self):
         error = GeminiEmbeddingClient._friendly_error(
             GeminiRequestError("quota", "Gemini usage limit reached.")
         )
-        self.assertIn("free-tier limit", str(error))
+        self.assertIn("usage limit", str(error))
 
-    def test_missing_key_is_rejected_before_gateway_creation(self):
+    def test_client_is_keyless(self):
         with patch.object(large_doc_manager, "GeminiGateway") as gateway:
-            with self.assertRaisesRegex(RuntimeError, "API key is required"):
-                GeminiEmbeddingClient("   ")
-        gateway.assert_not_called()
+            GeminiEmbeddingClient()
+        gateway.assert_called_once_with()
+
+    def test_non_finite_or_non_numeric_vectors_are_rejected(self):
+        for bad_value in (float("nan"), float("inf"), "not-a-number"):
+            embedding_client, fake_gateway = self._embedding_client()
+            vector = [0.0] * GeminiEmbeddingClient.DIMENSION
+            vector[0] = bad_value
+            fake_gateway.embed_contents.side_effect = None
+            fake_gateway.embed_contents.return_value = type(
+                "Response", (), {"embeddings": [_FakeEmbedding(vector)]}
+            )()
+            with self.subTest(value=bad_value), self.assertRaisesRegex(RuntimeError, "invalid embedding"):
+                embedding_client.embed_query("question")
 
     def test_network_and_timeout_errors_are_user_friendly(self):
         for category in ("network", "timeout"):
@@ -127,19 +141,18 @@ class GeminiEmbeddingClientTests(unittest.TestCase):
                 error = GeminiEmbeddingClient._friendly_error(
                     GeminiRequestError(category, "secret provider details")
                 )
-                self.assertIn("connect to the internet", str(error))
+                self.assertIn("could not be reached", str(error))
                 self.assertNotIn("secret", str(error))
 
     def test_cancellation_between_embedding_batches_stops_followup_requests(self):
         embedding_client, fake_client = self._embedding_client()
-        with patch.object(
-            GeminiGateway,
-            "check_cancelled",
-            side_effect=[None, None, GeminiCancelledError("cancelled")],
-        ):
-            with self.assertRaises(GeminiCancelledError):
-                embedding_client.embed_documents(["chunk"] * 70)
-        self.assertEqual(len(fake_client.models.requests), 1)
+        fake_client.embed_contents.side_effect = [
+            type("Response", (), {"embeddings": [_FakeEmbedding([0.0] * 768) for _ in range(32)]})(),
+            GeminiCancelledError("cancelled"),
+        ]
+        with self.assertRaises(GeminiCancelledError):
+            embedding_client.embed_documents(["chunk"] * 70)
+        self.assertEqual(fake_client.embed_contents.call_count, 2)
 
     def test_large_input_is_split_into_safe_batches(self):
         embedding_client, fake_client = self._embedding_client()
@@ -148,8 +161,10 @@ class GeminiEmbeddingClientTests(unittest.TestCase):
         vectors = embedding_client.embed_documents(texts, title="large.txt")
 
         self.assertEqual(len(vectors), len(texts))
-        self.assertGreater(len(fake_client.models.requests), 1)
-        for _model, contents, _config in fake_client.models.requests:
+        self.assertGreater(fake_client.embed_contents.call_count, 1)
+        for call in fake_client.embed_contents.call_args_list:
+            contents, dimension = call.args
+            self.assertEqual(dimension, 768)
             self.assertLessEqual(len(contents), GeminiEmbeddingClient.MAX_BATCH_ITEMS)
 
 
@@ -263,7 +278,7 @@ class VectorStoreMetadataTests(unittest.TestCase):
     def test_document_can_be_indexed_and_retrieved(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             manager = LargeDocumentManager(temp_dir)
-            manager._embedding = lambda api_key=None: _FakeEmbeddingClient()
+            manager._embedding = lambda: _FakeEmbeddingClient()
             doc_key = "rag-store"
 
             chunk_count = manager.prepare_document(

@@ -47,12 +47,8 @@ class GeminiOcrError(RuntimeError):
         self.diagnostic = _sanitize_diagnostic(diagnostic)
 
 
-def extract_text_from_image(file_path: str, api_key: str) -> str:
-    """Transcribe a PNG or JPEG image with Gemini."""
-    key = (api_key or "").strip()
-    if not key:
-        raise GeminiOcrError("missing_key")
-
+def extract_text_from_image(file_path: str) -> str:
+    """Transcribe a PNG or JPEG image through the authenticated backend."""
     image_path = os.fspath(file_path) if file_path is not None else ""
     extension = os.path.splitext(image_path)[1].lower()
     mime_type = _IMAGE_MIME_TYPES.get(extension)
@@ -73,7 +69,7 @@ def extract_text_from_image(file_path: str, api_key: str) -> str:
 
     gateway = None
     try:
-        gateway = GeminiGateway(key)
+        gateway = GeminiGateway()
         response = gateway.transcribe_image(image_bytes, mime_type, _OCR_PROMPT)
         if _response_was_blocked(response):
             raise GeminiOcrError("blocked")
@@ -87,11 +83,13 @@ def extract_text_from_image(file_path: str, api_key: str) -> str:
     except GeminiCancelledError:
         raise
     except GeminiRequestError as exc:
-        reason = exc.category if exc.category in {"auth", "quota", "invalid_image", "model_unavailable", "timeout", "network", "service"} else "service"
+        reason = exc.category if exc.category in {
+            "auth", "account_inactive", "license", "configuration", "quota",
+            "invalid_image", "model_unavailable", "timeout", "network",
+            "blocked", "no_text", "validation", "service",
+        } else "service"
         raise GeminiOcrError(reason) from None
     except Exception as exc:
-        if "google gen ai sdk is unavailable" in str(exc).lower():
-            raise GeminiOcrError("sdk_missing") from exc
         raise _map_api_error(exc) from exc
     finally:
         if gateway is not None:

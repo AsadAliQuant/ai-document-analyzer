@@ -42,6 +42,7 @@ from lock_overlay import LockOverlay
 from license_manager import LicenseManager
 from license_overlay import LicenseOverlay
 from auth import AuthState, clear_tokens
+from backend_api import resolve_api_base_url
 
 
 def _asset_path(*parts) -> str:
@@ -501,49 +502,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             pass
 
     def _get_api_base_url_fallback(self) -> str:
-        # 1. Prefer user-specific config in %APPDATA%
-        try:
-            import json as _json
-            import os as _os
-            appdata = _os.getenv("APPDATA") or _os.path.expanduser("~")
-            cfg_dir = _os.path.join(appdata, "AI Document Analyzer")
-            cfg_path = _os.path.join(cfg_dir, "config.json")
-            if _os.path.exists(cfg_path):
-                with open(cfg_path, "r", encoding="utf-8") as f:
-                    cfg = _json.load(f)
-                base = cfg.get("API_BASE_URL")
-                if base:
-                    return str(base).rstrip("/")
-        except Exception:
-            pass
-        # 2. Check bundled config.json inside PyInstaller _MEIPASS (--onefile)
-        try:
-            import json as _json
-            if getattr(sys, 'frozen', False):
-                _meipass = getattr(sys, '_MEIPASS', None) or os.path.dirname(sys.executable)
-            else:
-                _meipass = os.path.dirname(os.path.abspath(__file__))
-            bundled_cfg = os.path.join(_meipass, "config.json")
-            if os.path.exists(bundled_cfg):
-                with open(bundled_cfg, "r", encoding="utf-8") as f:
-                    cfg = _json.load(f)
-                base = cfg.get("API_BASE_URL")
-                if base:
-                    return str(base).rstrip("/")
-        except Exception:
-            pass
-        # 3. Fallback to config.json in CWD (development runs)
-        try:
-            import json as _json
-            if os.path.exists("config.json"):
-                with open("config.json", "r", encoding="utf-8") as f:
-                    cfg = _json.load(f)
-                base = cfg.get("API_BASE_URL")
-                if base:
-                    return str(base).rstrip("/")
-        except Exception:
-            pass
-        return "https://ssma.sa/console/api"
+        """Compatibility wrapper over the shared backend URL resolver."""
+        return resolve_api_base_url()
 
     # Override init-finished hook to stop the overlay's loading animation
     def _on_init_finished(self):
@@ -679,10 +639,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 QMessageBox.information(self, "Input Required", "Please choose a supported file (PDF/DOCX/TXT/PNG/JPG).")
                 return
 
-        gemini_key = self._get_gemini_key()
-        if not gemini_key:
-            QMessageBox.warning(self, "Gemini", "Missing GOOGLE_API_KEY. Add it in Settings.")
-            return
         self._set_status("Gemini analysis...")
 
         try:
@@ -697,13 +653,12 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
 
         # NOTE: Any heavy operations (like file text extraction) are handled in the worker thread now
 
-        # Prepare params for background execution using the key captured on the UI thread.
+        # Prepare params for background execution.
         params = {
             "model": GEMINI_MODEL_FALLBACK_LABEL,
             "is_image": is_image,
             "file_path": file_path,
             "input_text": input_text,
-            "gemini_key": gemini_key,
         }
 
         doc_key = ""
@@ -730,19 +685,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         if (file_path or input_text) and doc_key:
             has_store = bool(document_manager.has_vector_store(doc_key))
             if not has_store:
-                if not gemini_key:
-                    if is_image:
-                        title, message = self._gemini_ocr_message("missing_key")
-                    else:
-                        title = "Gemini Embedding"
-                        message = (
-                            "A Gemini API key is required to index documents. "
-                            "Add it in Settings and try again."
-                            if self._current_lang != "ar"
-                            else "يلزم مفتاح Gemini API لفهرسة المستندات. أضِفه في الإعدادات ثم حاول مرة أخرى."
-                        )
-                    QMessageBox.warning(self, title, message)
-                    return
                 self._current_doc_key = doc_key
                 self._pending_analysis_params = params
                 if file_path:
@@ -751,13 +693,12 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                     self._start_large_doc_processing(
                         file_path,
                         doc_key,
-                        gemini_key,
                         is_image=is_image,
                     )
                 else:
                     self._set_status("Processing pasted text...")
                     self._set_loading(True)
-                    self._start_pasted_text_processing(doc_key, input_text, gemini_key)
+                    self._start_pasted_text_processing(doc_key, input_text)
                 return
             # Already processed; use existing vector store
             self._qa_vector_doc_key = doc_key
@@ -852,7 +793,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             lines.append(f"{prefix}: {content}")
         return "\n".join(lines)
 
-    def _classify_question_intent(self, question: str, model: str, gemini_key: str = "") -> dict:
+    def _classify_question_intent(self, question: str, model: str) -> dict:
         """Use Gemini to classify Q&A intent and counting operands."""
         default_intent = {"operation": "semantic_qa", "target": "", "unit": ""}
         if not question.strip():
@@ -893,11 +834,8 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         }
 
         try:
-            if not gemini_key:
-                return default_intent
             response = self._generate_gemini_text(
                 intent_prompt,
-                gemini_key,
                 response_json_schema=response_schema,
             ) or ""
 
@@ -1088,14 +1026,13 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             # Fallback for Python versions without 'usedforsecurity'
             return hashlib.md5(raw.encode("utf-8")).hexdigest()
 
-    def _start_pasted_text_processing(self, doc_key: str, text: str, gemini_key: str):
+    def _start_pasted_text_processing(self, doc_key: str, text: str):
         """Start background processing for pasted text with RAG chunking."""
         self._processing_thread = QThread(self)
         self._processing_worker = PastedTextProcessWorker(
             self,
             doc_key,
             text,
-            gemini_key,
             self._session_id,
         )
         self._start_processing_worker()
@@ -1104,7 +1041,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         self,
         file_path: str,
         doc_key: str,
-        gemini_key: str,
         is_image: bool = False,
     ):
         """Start background processing for documents or images."""
@@ -1113,7 +1049,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             self,
             file_path,
             doc_key,
-            gemini_key,
             self._session_id,
             is_image=is_image,
         )
@@ -1191,9 +1126,12 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 "missing_key": "يلزم مفتاح Gemini API لمعالجة الصور. افتح الإعدادات وأضف المفتاح ثم حاول مرة أخرى.",
                 "sdk_missing": "حزمة Google Gen AI غير متاحة. ثبّت حزمة google-genai ثم أعد تشغيل التطبيق.",
                 "invalid_image": "الصورة غير مدعومة أو فارغة أو تالفة أو لا يمكن قراءتها. اختر ملف PNG أو JPG صالحاً.",
-                "auth": "رفض Gemini مفتاح API. تحقق من المفتاح المحفوظ في الإعدادات.",
-                "quota": "تم بلوغ حصة Gemini أو حد الطلبات. انتظر حتى تتجدد الحصة أو تحقق من الفوترة.",
-                "network": "تعذر الاتصال بـ Gemini. تحقق من اتصال الإنترنت ثم حاول مرة أخرى.",
+                "auth": "انتهت جلسة تسجيل الدخول. سجّل الدخول مرة أخرى.",
+                "account_inactive": "الحساب غير نشط. تواصل مع الدعم.",
+                "license": "يلزم ترخيص نشط لاستخدام خدمة الذكاء الاصطناعي. تواصل مع الدعم.",
+                "configuration": "خدمة الذكاء الاصطناعي غير مهيأة. تواصل مع المسؤول.",
+                "quota": "تم بلوغ حد استخدام خدمة الذكاء الاصطناعي. انتظر ثم حاول مرة أخرى.",
+                "network": "تعذر الاتصال بخدمة الذكاء الاصطناعي. تحقق من اتصال الإنترنت ثم حاول مرة أخرى.",
                 "timeout": "انتهت مهلة طلب استخراج النص من الصورة. تحقق من اتصال الإنترنت ثم حاول مرة أخرى.",
                 "service": "خدمة Gemini غير متاحة مؤقتاً. حاول مرة أخرى بعد قليل.",
                 "model_unavailable": "لا يتوفر أي نموذج من نماذج Gemini الاحتياطية لهذا المفتاح أو الحساب. تحقق من إتاحة Gemini 2.5 و3.1 و3.5 Flash-Lite.",
@@ -1206,9 +1144,12 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 "missing_key": "Gemini image OCR requires an API key. Open Settings, add the Gemini API key, and try again.",
                 "sdk_missing": "The Google Gen AI SDK is unavailable. Install the 'google-genai' package and restart the application.",
                 "invalid_image": "The image is unsupported, empty, damaged, or unreadable. Choose a valid PNG or JPG image.",
-                "auth": "Gemini rejected the API key. Check the key saved in Settings.",
-                "quota": "The Gemini quota or rate limit was reached. Wait for the quota to reset or check billing.",
-                "network": "Gemini could not be reached. Check the internet connection and try again.",
+                "auth": "Your session has expired. Please sign in again.",
+                "account_inactive": "Your account is inactive. Please contact support.",
+                "license": "An active license is required to use the AI service. Please contact support.",
+                "configuration": "The AI service is not configured. Contact an administrator.",
+                "quota": "The AI service usage limit was reached. Wait a while and try again.",
+                "network": "The AI service could not be reached. Check the internet connection and try again.",
                 "timeout": "The image text extraction request timed out. Check the internet connection and try again.",
                 "service": "The Gemini service is temporarily unavailable. Try again shortly.",
                 "model_unavailable": "No configured Gemini fallback model is available for this API key or account. Check access to Gemini 2.5, 3.1, and 3.5 Flash-Lite.",
@@ -1224,12 +1165,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         if not self._last_summary_text.strip():
             QMessageBox.information(self, "Q&A", "Please generate a summary first.")
             return
-        # Capture the key on the UI thread; classification runs in the worker.
-        gemini_key = self._get_gemini_key()
-        if not gemini_key:
-            QMessageBox.warning(self, "Gemini", "Missing GOOGLE_API_KEY. Add it in Settings.")
-            return
-
         # Use full original document text (extracted or pasted) by default
         include_input = True
         self._append_chat("You", question)
@@ -1244,7 +1179,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             "messages": list(self._qa_messages),
             "summary": self._last_summary_text,
             "input_text": (self._qa_document_text or self._last_input_text_for_qa) if include_input else "",
-            "gemini_key": gemini_key,
             "doc_key": self._qa_vector_doc_key,
         }
 
@@ -1729,14 +1663,14 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         _, ext = os.path.splitext(file_path)
         return (ext or "").lower() in {".png", ".jpg", ".jpeg"}
 
-    def extract_text_from_file(self, file_path: str, gemini_key: str = "") -> str:
+    def extract_text_from_file(self, file_path: str) -> str:
         """Extract text from PDF, DOCX, TXT, or image files. Raises on unsupported types."""
         _, ext = os.path.splitext(file_path)
         ext = (ext or "").lower()
         
         # Images are transcribed by Gemini before entering the normal text pipeline.
         if ext in {".png", ".jpg", ".jpeg"}:
-            return self.extract_text_from_image_ocr(file_path, gemini_key)
+            return self.extract_text_from_image_ocr(file_path)
         
         if ext == ".pdf":
             if PdfReader is None:
@@ -1762,19 +1696,18 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             raise RuntimeError(".doc files are not supported. Please convert to .docx or PDF.")
         raise RuntimeError(f"Unsupported file type: {ext}")
     
-    def extract_text_from_image_ocr(self, file_path: str, gemini_key: str) -> str:
+    def extract_text_from_image_ocr(self, file_path: str) -> str:
         """Extract image text with the fixed Gemini OCR pipeline."""
-        return extract_text_from_image(file_path, gemini_key)
+        return extract_text_from_image(file_path)
 
     # --- Summarization Helpers ---
     def _generate_gemini_text(
         self,
         prompt: str,
-        api_key: str,
         system_instruction: Optional[str] = None,
         response_json_schema: Optional[dict] = None,
     ) -> Optional[str]:
-        gateway = GeminiGateway(api_key)
+        gateway = GeminiGateway()
         try:
             return gateway.generate_text(
                 prompt,
@@ -1784,7 +1717,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         finally:
             gateway.close()
 
-    def summarize_text_gemini(self, _model: str, input_text: str, api_key: str) -> Optional[str]:
+    def summarize_text_gemini(self, _model: str, input_text: str) -> Optional[str]:
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         if is_ar:
             sys_instr = (
@@ -1812,7 +1745,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             )
         return self._generate_gemini_text(
             user_prompt,
-            api_key,
             system_instruction=sys_instr,
         )
 
@@ -2063,7 +1995,7 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
         except Exception:
             return body_inner_html
     # --- Q&A Helpers ---
-    def answer_question_gemini(self, _model: str, messages, summary: str, input_text: str, api_key: str, doc_key: str = "") -> Optional[str]:
+    def answer_question_gemini(self, _model: str, messages, summary: str, input_text: str, doc_key: str = "") -> Optional[str]:
         is_ar = getattr(self, '_current_lang', 'en') == 'ar'
         if is_ar:
             system_prompt = (
@@ -2091,7 +2023,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
                 docs = document_manager.retrieve_context(
                     doc_key,
                     user_question or "",
-                    api_key=api_key,
                 )
             except GeminiCancelledError:
                 raise
@@ -2141,7 +2072,6 @@ class MainWindow(LoadingOverlayMixin, QMainWindow):
             )
         return self._generate_gemini_text(
             user_prompt,
-            api_key,
             system_instruction=system_prompt,
         )
 
@@ -2274,7 +2204,6 @@ class _AnalysisWorker(QObject):
             is_image = self.params.get("is_image")
             file_path = self.params.get("file_path")
             input_text = self.params.get("input_text")
-            gemini_key = self.params.get("gemini_key")
             doc_key = self.params.get("doc_key", "")
 
             # Move potentially heavy file text extraction to the worker thread
@@ -2290,7 +2219,7 @@ class _AnalysisWorker(QObject):
                     if not os.path.exists(file_path):
                         self.error.emit("", f"File does not exist:\n{file_path}", self.session_id)
                         return
-                    extracted = self.window.extract_text_from_file(file_path, gemini_key)
+                    extracted = self.window.extract_text_from_file(file_path)
                     if not extracted:
                         self.error.emit("", "Could not extract text from the selected file.", self.session_id)
                         return
@@ -2311,7 +2240,7 @@ class _AnalysisWorker(QObject):
             except Exception:
                 effective_text = ""
 
-            summary = self.window.summarize_text_gemini(model, input_text, gemini_key)
+            summary = self.window.summarize_text_gemini(model, input_text)
             GeminiGateway.check_cancelled()
             self.finished.emit(summary or "(No response)", "Gemini - Done", "Analysis Complete", "Your Gemini analysis has finished.", effective_text, doc_key_out, self.session_id)
         except GeminiCancelledError:
@@ -2337,7 +2266,6 @@ class _QAWorker(QObject):
             messages = self.params.get("messages") or []
             summary = self.params.get("summary")
             input_text = self.params.get("input_text")
-            gemini_key = self.params.get("gemini_key")
             doc_key = self.params.get("doc_key", "")
 
             # Classify the question and extract any counting operand in the background thread.
@@ -2351,7 +2279,6 @@ class _QAWorker(QObject):
                     intent = self.window._classify_question_intent(
                         question,
                         model,
-                        gemini_key or "",
                     )
                     if intent.get("operation") in {
                         "literal_occurrence_count",
@@ -2367,14 +2294,7 @@ class _QAWorker(QObject):
                 # On any classification or local counting error, proceed with normal RAG.
                 pass
 
-            if doc_key and not (gemini_key or "").strip():
-                self.error.emit(
-                    "A Gemini API key is required for document semantic search. Add it in Settings and try again.",
-                    self.session_id,
-                )
-                return
-
-            answer = self.window.answer_question_gemini(model, messages, summary, input_text, gemini_key, doc_key)
+            answer = self.window.answer_question_gemini(model, messages, summary, input_text, doc_key)
             GeminiGateway.check_cancelled()
             self.finished.emit(answer or "", self.session_id)
         except GeminiCancelledError:
@@ -2393,7 +2313,6 @@ class LargeDocProcessWorker(QObject):
         window: 'MainWindow',
         file_path: str,
         doc_key: str,
-        gemini_key: str,
         session_id: int,
         is_image: bool = False,
     ):
@@ -2401,7 +2320,6 @@ class LargeDocProcessWorker(QObject):
         self.window = window
         self.file_path = file_path
         self.doc_key = doc_key
-        self.gemini_key = gemini_key
         self.session_id = session_id
         self.is_image = is_image
 
@@ -2412,7 +2330,7 @@ class LargeDocProcessWorker(QObject):
                 self.error.emit(f"File does not exist:\n{self.file_path}", self.session_id)
                 return
             
-            text = self.window.extract_text_from_file(self.file_path, self.gemini_key)
+            text = self.window.extract_text_from_file(self.file_path)
             
             if not text or not text.strip():
                 if self.is_image:
@@ -2426,7 +2344,6 @@ class LargeDocProcessWorker(QObject):
                 self.doc_key,
                 self.file_path,
                 text,
-                api_key=self.gemini_key,
             )
             self.finished.emit(self.doc_key, chunk_count, self.session_id)
         except GeminiCancelledError:
@@ -2446,14 +2363,12 @@ class PastedTextProcessWorker(QObject):
         window: 'MainWindow',
         doc_key: str,
         text: str,
-        gemini_key: str,
         session_id: int,
     ):
         super().__init__()
         self.window = window
         self.doc_key = doc_key
         self.text = text
-        self.gemini_key = gemini_key
         self.session_id = session_id
 
     @pyqtSlot()
@@ -2470,7 +2385,6 @@ class PastedTextProcessWorker(QObject):
                 self.doc_key,
                 source_label,
                 clean_text,
-                api_key=self.gemini_key,
             )
             self.finished.emit(self.doc_key, chunk_count, self.session_id)
         except GeminiCancelledError:

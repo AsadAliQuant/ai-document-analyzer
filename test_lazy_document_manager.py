@@ -23,14 +23,14 @@ class _RecordingManager:
         self.prepare_calls = []
         self.retrieve_calls = []
 
-    def prepare_document(self, doc_key, source, text, api_key=None):
+    def prepare_document(self, doc_key, source, text):
         with self._lock:
-            self.prepare_calls.append((doc_key, source, text, api_key))
+            self.prepare_calls.append((doc_key, source, text))
         return 1
 
-    def retrieve_context(self, doc_key, query, api_key=None):
+    def retrieve_context(self, doc_key, query):
         with self._lock:
-            self.retrieve_calls.append((doc_key, query, api_key))
+            self.retrieve_calls.append((doc_key, query))
         return [types.SimpleNamespace(page_content="Retrieved document context")]
 
 
@@ -47,7 +47,6 @@ class LazyDocumentManagerTests(unittest.TestCase):
             window,
             doc_key,
             "synthetic text",
-            "api-key",
             session_id,
         )
         worker.finished = _Signal()
@@ -177,7 +176,6 @@ class LazyDocumentManagerTests(unittest.TestCase):
                 messages,
                 "unused summary",
                 "fallback document text",
-                "api-key",
                 "doc-key",
             )
             second = window.answer_question_gemini(
@@ -185,7 +183,6 @@ class LazyDocumentManagerTests(unittest.TestCase):
                 messages,
                 "unused summary",
                 "fallback document text",
-                "api-key",
                 "doc-key",
             )
 
@@ -195,8 +192,8 @@ class LazyDocumentManagerTests(unittest.TestCase):
         self.assertEqual(
             manager.retrieve_calls,
             [
-                ("doc-key", "What is the result?", "api-key"),
-                ("doc-key", "What is the result?", "api-key"),
+                ("doc-key", "What is the result?"),
+                ("doc-key", "What is the result?"),
             ],
         )
         self.assertEqual(len(prompts), 2)

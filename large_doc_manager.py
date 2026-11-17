@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import os
 import time
 from typing import List, Optional
@@ -26,14 +27,8 @@ class GeminiEmbeddingClient:
     MAX_REQUEST_TOKENS = 24000
     MAX_BATCH_ITEMS = 32
 
-    def __init__(self, api_key: str) -> None:
-        key = (api_key or "").strip()
-        if not key:
-            raise RuntimeError(
-                "A Gemini API key is required for document indexing and semantic search. "
-                "Add it in Settings and try again."
-            )
-        self._gateway = GeminiGateway(key)
+    def __init__(self) -> None:
+        self._gateway = GeminiGateway()
 
     def close(self) -> None:
         self._gateway.close()
@@ -98,6 +93,12 @@ class GeminiEmbeddingClient:
         vectors = [list(getattr(item, "values", None) or []) for item in embeddings]
         if len(vectors) != len(prompts) or any(len(vector) != self.DIMENSION for vector in vectors):
             raise RuntimeError("Gemini returned an invalid embedding response. Please try again.")
+        if any(
+            not isinstance(value, (int, float)) or isinstance(value, bool) or not math.isfinite(float(value))
+            for vector in vectors
+            for value in vector
+        ):
+            raise RuntimeError("Gemini returned an invalid embedding response. Please try again.")
         return vectors
 
     @staticmethod
@@ -105,15 +106,17 @@ class GeminiEmbeddingClient:
         category = getattr(exc, "category", "service")
         if category == "quota":
             return RuntimeError(
-                "Gemini Embedding free-tier limit was reached. Wait for the quota to reset and try again."
+                "The AI service usage limit was reached. Wait a while and try again."
             )
         if category == "auth":
-            return RuntimeError(
-                "Gemini rejected the API key. Check the Gemini API key in Settings."
-            )
+            return RuntimeError("Your session has expired. Please sign in again.")
+        if category in {"account_inactive", "license"}:
+            return RuntimeError("Your account cannot use the AI service. Please contact support.")
+        if category == "configuration":
+            return RuntimeError("The AI service is not configured. Contact an administrator.")
         if category in {"network", "timeout"}:
             return RuntimeError(
-                "Gemini Embedding could not connect to the internet. Check the connection and try again."
+                "The AI service could not be reached. Check the connection and try again."
             )
         return RuntimeError("Gemini Embedding request failed. Please try again shortly.")
 
@@ -241,7 +244,6 @@ class LargeDocumentManager:
         text: str,
         chunk_size: int = 1200,
         chunk_overlap: int = 200,
-        api_key: Optional[str] = None,
     ) -> int:
         """Split text, embed, and persist to Qdrant. Returns chunk count."""
         clean_text = (text or "").strip()
@@ -281,7 +283,7 @@ class LargeDocumentManager:
         if not documents:
             raise ValueError("Failed to create document chunks for vector store.")
 
-        embeddings = self._embedding(api_key)
+        embeddings = self._embedding()
 
         # Generate vectors before replacing an existing store. If Gemini is
         # unavailable, the last valid index remains usable.
@@ -392,7 +394,6 @@ class LargeDocumentManager:
         doc_key: str,
         query: str,
         k: int = 25,
-        api_key: Optional[str] = None,
     ) -> List[Document]:
         if not self.has_vector_store(doc_key):
             return []
@@ -405,7 +406,7 @@ class LargeDocumentManager:
         qdrant_client = None
         embeddings = None
         try:
-            embeddings = self._embedding(api_key)
+            embeddings = self._embedding()
             qdrant_client = QdrantClient(path=qdrant_dir)
             collection_name = f"doc_{doc_key}"
             
@@ -472,15 +473,8 @@ class LargeDocumentManager:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-    def _embedding(self, api_key: Optional[str] = None) -> GeminiEmbeddingClient:
-        api_key = (api_key or "").strip()
-        if not api_key:
-            raise RuntimeError(
-                "A Gemini API key is required for document indexing and semantic search. "
-                "Add it in Settings and try again."
-            )
-
-        return GeminiEmbeddingClient(api_key)
+    def _embedding(self) -> GeminiEmbeddingClient:
+        return GeminiEmbeddingClient()
 
 
     def _write_backend_marker(self, store_dir: str, backend: str) -> None:

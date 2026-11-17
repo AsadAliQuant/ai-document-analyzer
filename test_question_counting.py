@@ -49,7 +49,6 @@ class QuestionCountingTests(unittest.TestCase):
             intent = window._classify_question_intent(
                 "How many times does the word BASELINEQUARTZ appear in the document?",
                 "ignored",
-                "key",
             )
 
         self.assertEqual(intent["operation"], "literal_occurrence_count")
@@ -106,7 +105,7 @@ class QuestionCountingTests(unittest.TestCase):
 
     def test_counting_question_bypasses_semantic_qa(self):
         class Window:
-            def _classify_question_intent(self, _question, _model, _key):
+            def _classify_question_intent(self, _question, _model):
                 return {
                     "operation": "literal_occurrence_count",
                     "target": "TOKEN",
@@ -124,7 +123,6 @@ class QuestionCountingTests(unittest.TestCase):
             "messages": [{"role": "user", "content": "How many TOKEN values?"}],
             "summary": "summary",
             "input_text": "TOKEN TOKEN TOKEN TOKEN",
-            "gemini_key": "captured-key",
             "doc_key": "doc-key",
         }, 11)
         worker.finished = _Signal()

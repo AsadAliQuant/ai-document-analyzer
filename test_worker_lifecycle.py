@@ -79,7 +79,7 @@ class WorkerLifecycleTests(unittest.TestCase):
             "main_window._AnalysisWorker",
             return_value=worker,
         ):
-            window._start_background_analysis({"gemini_key": "key"})
+            window._start_background_analysis({"model": "automatic"})
 
         self.assertIs(worker.moved_to, thread)
         self.assertEqual(thread.start_calls, 1)
@@ -125,7 +125,6 @@ class WorkerLifecycleTests(unittest.TestCase):
         window._last_input_text_for_qa = ""
         window._qa_messages = []
         window._session_id = 4
-        window._get_gemini_key = lambda: "captured-key"
         window._append_chat = lambda *_args: None
         window._append_history = lambda role, content: window._qa_messages.append(
             {"role": role, "content": content}

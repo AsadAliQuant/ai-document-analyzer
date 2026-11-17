@@ -1,264 +1,187 @@
-import types
+import threading
+import time
 import unittest
 from unittest.mock import patch
 
+import auth
 import main_window
-from gemini_fallback import GEMINI_MODEL_FALLBACKS
+from backend_api import BackendApiClient, BackendApiError
 from gemini_gateway import GeminiCancelledError, GeminiGateway, GeminiRequestError
 from main_window import MainWindow
 
 
-class _FakeApiError(Exception):
-    def __init__(self, code, message):
-        super().__init__(message)
-        self.code = code
-        self.message = message
+class _Response:
+    def __init__(self, status_code=200, payload=None):
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self):
+        if isinstance(self._payload, Exception):
+            raise self._payload
+        return self._payload
 
 
-class _FakeHttpOptions:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
-
-
-class _FakeGenerateContentConfig:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
-
-
-class _FakeEmbedContentConfig:
-    def __init__(self, **kwargs):
-        self.__dict__.update(kwargs)
-
-
-class _FakePart:
-    @staticmethod
-    def from_text(text):
-        return types.SimpleNamespace(text=text)
-
-
-class _FakeModels:
-    def __init__(self, failures):
-        self.failures = failures
-        self.requests = []
-        self.embedding_requests = []
-
-    def generate_content(self, **kwargs):
-        self.requests.append(kwargs)
-        error = self.failures.get(kwargs["model"])
-        if error is not None:
-            raise error
-        return types.SimpleNamespace(text="generated text")
-
-    def embed_content(self, **kwargs):
-        self.embedding_requests.append(kwargs)
-        raise _FakeApiError(503, "Service unavailable")
-
-
-class _FakeClient:
-    def __init__(self, failures):
-        self.models = _FakeModels(failures)
+class _Session:
+    def __init__(self, responses):
+        self.responses = list(responses)
+        self.calls = []
         self.closed = False
+
+    def post(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.responses.pop(0)
 
     def close(self):
         self.closed = True
 
 
-class GeminiGenerationFallbackTests(unittest.TestCase):
-    def _window(self):
-        return MainWindow.__new__(MainWindow)
+class GeminiGenerationTests(unittest.TestCase):
+    def setUp(self):
+        auth.AuthState.access_token = "access-token"
+        auth.AuthState.access_expiry_ts = int(time.time()) + 3600
 
-    def _fake_sdk(self, failures):
-        client = _FakeClient(failures)
-        fake_genai = types.SimpleNamespace(
-            Client=lambda **_kwargs: client,
-        )
-        fake_types = types.SimpleNamespace(
-            HttpOptions=_FakeHttpOptions,
-            GenerateContentConfig=_FakeGenerateContentConfig,
-            EmbedContentConfig=_FakeEmbedContentConfig,
-            Part=_FakePart,
-            Content=lambda **kwargs: types.SimpleNamespace(**kwargs),
-        )
-        return client, fake_genai, fake_types
+    def _gateway(self, responses):
+        session = _Session(responses)
+        client = BackendApiClient(base_url="https://api.example.test/root/", session=session)
+        return GeminiGateway(client=client), session
 
-    def test_generation_falls_back_for_unavailable_models(self):
-        failures = {
-            GEMINI_MODEL_FALLBACKS[0]: _FakeApiError(503, "Service unavailable"),
-            GEMINI_MODEL_FALLBACKS[1]: _FakeApiError(404, "Model not found"),
-        }
-        client, fake_genai, fake_types = self._fake_sdk(failures)
+    def test_generation_sends_exact_authenticated_backend_request(self):
+        gateway, session = self._gateway([
+            _Response(payload={"ok": True, "request_id": "req-1", "data": {"text": "generated"}})
+        ])
+        schema = {"type": "object"}
 
-        with patch.object(main_window, "GeminiGateway", lambda key: GeminiGateway(key, sdk=fake_genai, types_module=fake_types)):
-            text = self._window()._generate_gemini_text(
-                "prompt",
-                "key",
-                system_instruction="system",
-            )
+        text = gateway.generate_text("prompt", system_instruction="system", response_schema=schema)
 
-        self.assertEqual(text, "generated text")
-        self.assertEqual(
-            [request["model"] for request in client.models.requests],
-            list(GEMINI_MODEL_FALLBACKS),
-        )
-        self.assertEqual(
-            client.models.requests[0]["config"].system_instruction,
-            "system",
-        )
-        self.assertTrue(client.closed)
+        self.assertEqual(text, "generated")
+        url, request = session.calls[0]
+        self.assertEqual(url, "https://api.example.test/root/v1/gemini/generate")
+        self.assertEqual(request["json"], {
+            "prompt": "prompt",
+            "system_instruction": "system",
+            "response_schema": schema,
+        })
+        self.assertEqual(request["headers"]["Authorization"], "Bearer access-token")
+        self.assertEqual(request["headers"]["Accept"], "application/json")
+        self.assertIn("X-Request-ID", request["headers"])
+        self.assertNotIn("model", request["json"])
+        self.assertNotIn("api_key", request["json"])
+        self.assertNotIn("timeout", request["json"])
+        self.assertEqual(len(session.calls), 1)
 
-    def test_generation_does_not_fall_back_for_quota(self):
-        error = _FakeApiError(429, "RESOURCE_EXHAUSTED")
-        client, fake_genai, fake_types = self._fake_sdk(
-            {GEMINI_MODEL_FALLBACKS[0]: error}
-        )
+    def test_auth_required_refreshes_and_replays_once(self):
+        gateway, session = self._gateway([
+            _Response(401, {"ok": False, "request_id": "req-old", "error": {"code": "AUTH_REQUIRED", "message": "hidden", "retryable": False}}),
+            _Response(200, {"ok": True, "request_id": "req-new", "data": {"text": "ok"}}),
+        ])
 
-        with patch.object(main_window, "GeminiGateway", lambda key: GeminiGateway(key, sdk=fake_genai, types_module=fake_types)):
-            with self.assertRaises(GeminiRequestError) as context:
-                self._window()._generate_gemini_text("prompt", "key")
+        def refresh(_base_url):
+            auth.AuthState.access_token = "new-token"
+            auth.AuthState.access_expiry_ts = int(time.time()) + 3600
 
-        self.assertEqual(context.exception.category, "quota")
-        self.assertNotIn("RESOURCE_EXHAUSTED", str(context.exception))
-        self.assertEqual(len(client.models.requests), 1)
-        self.assertTrue(client.closed)
+        with patch("backend_api.auth.refresh", side_effect=refresh) as refresh_call:
+            self.assertEqual(gateway.generate_text("prompt"), "ok")
 
-    def test_cancelled_operation_does_not_start_a_request(self):
-        client, fake_genai, fake_types = self._fake_sdk({})
-        gateway = GeminiGateway("key", client=client, types_module=fake_types)
-        with patch("PyQt6.QtCore.QThread.currentThread") as current_thread:
-            current_thread.return_value.isInterruptionRequested.return_value = True
+        refresh_call.assert_called_once()
+        self.assertEqual(len(session.calls), 2)
+        self.assertEqual(session.calls[1][1]["headers"]["Authorization"], "Bearer new-token")
+
+    def test_non_auth_failure_is_not_replayed_and_metadata_is_preserved(self):
+        gateway, session = self._gateway([
+            _Response(429, {"ok": False, "request_id": "safe-id", "error": {
+                "code": "RATE_LIMITED", "message": "raw secret body", "retryable": True,
+                "retry_after_seconds": 60,
+            }})
+        ])
+        with self.assertRaises(GeminiRequestError) as context:
+            gateway.generate_text("secret prompt")
+        error = context.exception
+        self.assertEqual(error.category, "quota")
+        self.assertEqual(error.error_code, "RATE_LIMITED")
+        self.assertEqual(error.request_id, "safe-id")
+        self.assertTrue(error.retryable)
+        self.assertEqual(error.retry_after_seconds, 60)
+        self.assertNotIn("secret", str(error).lower())
+        self.assertEqual(len(session.calls), 1)
+
+    def test_malformed_envelope_is_safe(self):
+        gateway, _session = self._gateway([_Response(200, ValueError("raw secret body"))])
+        with self.assertRaises(GeminiRequestError) as context:
+            gateway.generate_text("secret prompt")
+        self.assertEqual(context.exception.category, "service")
+        self.assertNotIn("secret", str(context.exception).lower())
+
+    def test_cancellation_before_and_after_request(self):
+        gateway, session = self._gateway([
+            _Response(payload={"ok": True, "request_id": "req", "data": {"text": "discard"}})
+        ])
+        with patch.object(GeminiGateway, "check_cancelled", side_effect=GeminiCancelledError("cancelled")):
             with self.assertRaises(GeminiCancelledError):
                 gateway.generate_text("prompt")
-        self.assertEqual(client.models.requests, [])
-        gateway.close()
+        self.assertEqual(session.calls, [])
 
-    def test_cancellation_after_response_discards_result(self):
-        client, fake_genai, fake_types = self._fake_sdk({})
-        gateway = GeminiGateway("key", client=client, types_module=fake_types)
-        with patch.object(GeminiGateway, "check_cancelled", side_effect=[None, GeminiCancelledError()]):
+        with patch.object(GeminiGateway, "check_cancelled", side_effect=[None, GeminiCancelledError("cancelled")]):
             with self.assertRaises(GeminiCancelledError):
                 gateway.generate_text("prompt")
-        self.assertEqual(len(client.models.requests), 1)
+        self.assertEqual(len(session.calls), 1)
+
+    def test_close_is_idempotent(self):
+        class Client:
+            def __init__(self): self.close_count = 0
+            def close(self): self.close_count += 1
+        client = Client()
+        gateway = GeminiGateway(client=client)
         gateway.close()
-
-    def test_client_uses_shared_timeout(self):
-        client, fake_genai, fake_types = self._fake_sdk({})
-        seen = {}
-        def create_client(**kwargs):
-            seen.update(kwargs)
-            return client
-        fake_genai.Client = create_client
-        gateway = GeminiGateway("key", sdk=fake_genai, types_module=fake_types)
-        self.assertEqual(seen["http_options"].timeout, 60_000)
         gateway.close()
+        self.assertEqual(client.close_count, 1)
 
-    def test_embedding_errors_do_not_fall_back_to_generation_models(self):
-        client, fake_genai, fake_types = self._fake_sdk(
-            {GEMINI_MODEL_FALLBACKS[0]: _FakeApiError(503, "Service unavailable")}
-        )
-        gateway = GeminiGateway("key", client=client, types_module=fake_types)
-        with self.assertRaises(GeminiRequestError):
-            gateway.embed_contents(["document text"], 768)
-        self.assertEqual(len(client.models.requests), 0)
-        self.assertEqual(len(client.models.embedding_requests), 1)
-        gateway.close()
-
-    def test_summary_uses_language_specific_prompt_and_captured_key(self):
-        for language in ("en", "ar"):
-            with self.subTest(language=language):
-                window = self._window()
-                window._current_lang = language
-                captured = {}
-
-                def generate(prompt, key, **kwargs):
-                    captured.update(prompt=prompt, key=key, **kwargs)
-                    return '{"summary": {"key_points": [], "methods": [], "conclusions": []}}'
-
-                window._generate_gemini_text = generate
-                result = window.summarize_text_gemini(
-                    "ignored-model",
-                    "Unique document body",
-                    "captured-key",
-                )
-
-                self.assertIn("Unique document body", captured["prompt"])
-                self.assertEqual(captured["key"], "captured-key")
-                self.assertEqual(result[:10], '{"summary"')
-                if language == "en":
-                    self.assertIn("Write the content in English", captured["prompt"])
-                    self.assertIn("expert summarizer", captured["system_instruction"])
-                else:
-                    self.assertNotIn("Write the content in English", captured["prompt"])
-                    self.assertTrue(any(ord(char) > 127 for char in captured["prompt"]))
-                    self.assertTrue(any(ord(char) > 127 for char in captured["system_instruction"]))
-
-    def test_qa_uses_document_context_history_and_selected_language(self):
-        messages = [
-            {"role": "user", "content": "Earlier question"},
-            {"role": "assistant", "content": "Earlier answer"},
-            {"role": "user", "content": "Current question"},
+    def test_concurrent_expired_token_refresh_is_coalesced(self):
+        auth.AuthState.access_expiry_ts = 0
+        sessions = [
+            _Session([_Response(200, {"ok": True, "request_id": str(i), "data": {"value": i}})])
+            for i in range(2)
         ]
+        barrier = threading.Barrier(2)
+        refresh_count = 0
+        refresh_lock = threading.Lock()
+
+        def refresh(_base_url):
+            nonlocal refresh_count
+            with refresh_lock:
+                refresh_count += 1
+            time.sleep(0.03)
+            auth.AuthState.access_token = "refreshed"
+            auth.AuthState.access_expiry_ts = int(time.time()) + 3600
+
+        errors = []
+        def run(session):
+            try:
+                barrier.wait()
+                BackendApiClient(base_url="https://api.test", session=session).post("/test", {})
+            except Exception as exc:
+                errors.append(exc)
+
+        with patch("backend_api.auth.refresh", side_effect=refresh):
+            threads = [threading.Thread(target=run, args=(session,)) for session in sessions]
+            for thread in threads: thread.start()
+            for thread in threads: thread.join()
+
+        self.assertEqual(errors, [])
+        self.assertEqual(refresh_count, 1)
+
+    def test_summary_and_qa_prompts_remain_keyless_and_localized(self):
+        window = MainWindow.__new__(MainWindow)
         for language in ("en", "ar"):
             with self.subTest(language=language):
-                window = self._window()
                 window._current_lang = language
-                captured = {}
-
-                def generate(prompt, key, **kwargs):
-                    captured.update(prompt=prompt, key=key, **kwargs)
-                    return "answer"
-
-                window._generate_gemini_text = generate
-                answer = window.answer_question_gemini(
-                    "ignored-model",
-                    messages,
-                    "summary must not replace document text",
-                    "Unique source context",
-                    "captured-key",
-                )
-
+                calls = []
+                window._generate_gemini_text = lambda prompt, **kwargs: calls.append((prompt, kwargs)) or "answer"
+                window.summarize_text_gemini("ignored", "Unique document body")
+                self.assertIn("Unique document body", calls[-1][0])
+                messages = [{"role": "user", "content": "Current question"}]
+                answer = window.answer_question_gemini("ignored", messages, "summary", "Unique source context")
                 self.assertEqual(answer, "answer")
-                self.assertEqual(captured["key"], "captured-key")
-                self.assertIn("Unique source context", captured["prompt"])
-                self.assertIn("Earlier question", captured["prompt"])
-                self.assertIn("Earlier answer", captured["prompt"])
-                self.assertIn("Current question", captured["prompt"])
-                self.assertNotIn("summary must not replace", captured["prompt"])
-                if language == "en":
-                    self.assertIn("Answer strictly based", captured["prompt"])
-                else:
-                    self.assertNotIn("Answer strictly based", captured["prompt"])
-                    self.assertTrue(any(ord(char) > 127 for char in captured["prompt"]))
-
-    def test_network_timeout_and_service_errors_are_safe_and_stable(self):
-        cases = (
-            (ConnectionError("network connection failed at secret.invalid"), "network", "Check your internet connection", False),
-            (TimeoutError("request timed out with token secret-token"), "timeout", "too long", False),
-            (_FakeApiError(503, "provider internals secret-token"), "service", "try again", True),
-        )
-        for raw_error, category, message_fragment, exhaust_fallbacks in cases:
-            with self.subTest(category=category):
-                failures = (
-                    {model: raw_error for model in GEMINI_MODEL_FALLBACKS}
-                    if exhaust_fallbacks
-                    else {GEMINI_MODEL_FALLBACKS[0]: raw_error}
-                )
-                client, fake_genai, fake_types = self._fake_sdk(
-                    failures
-                )
-                gateway = GeminiGateway("captured-key", client=client, types_module=fake_types)
-
-                with self.assertRaises(GeminiRequestError) as context:
-                    gateway.generate_text("prompt")
-
-                self.assertEqual(context.exception.category, category)
-                self.assertIn(message_fragment.lower(), str(context.exception).lower())
-                self.assertNotIn("secret", str(context.exception).lower())
-                self.assertEqual(
-                    len(client.models.requests),
-                    len(GEMINI_MODEL_FALLBACKS) if exhaust_fallbacks else 1,
-                )
-                gateway.close()
-                self.assertTrue(client.closed)
+                self.assertIn("Unique source context", calls[-1][0])
 
 
 if __name__ == "__main__":

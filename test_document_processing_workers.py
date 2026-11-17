@@ -19,8 +19,8 @@ class _Manager:
     def __init__(self):
         self.calls = []
 
-    def prepare_document(self, doc_key, source, text, api_key=None):
-        self.calls.append((doc_key, source, text, api_key))
+    def prepare_document(self, doc_key, source, text):
+        self.calls.append((doc_key, source, text))
         return 3
 
 
@@ -42,8 +42,8 @@ class _Window:
         self.manager_requests += 1
         return self.large_doc_manager
 
-    def extract_text_from_file(self, file_path, gemini_key=""):
-        self.extraction_calls.append((file_path, gemini_key))
+    def extract_text_from_file(self, file_path):
+        self.extraction_calls.append(file_path)
         if self.extraction_error is not None:
             raise self.extraction_error
         return self.extracted_text
@@ -86,7 +86,6 @@ class DocumentProcessingWorkerTests(unittest.TestCase):
             window,
             self._image_path(),
             "image-key",
-            "api-key",
             7,
             is_image=True,
         )
@@ -95,11 +94,11 @@ class DocumentProcessingWorkerTests(unittest.TestCase):
 
         worker.run()
 
-        self.assertEqual(window.extraction_calls[0][1], "api-key")
+        self.assertEqual(window.extraction_calls[0], worker.file_path)
         self.assertEqual(window.manager_requests, 1)
         self.assertEqual(
             window.large_doc_manager.calls,
-            [("image-key", window.extraction_calls[0][0], " First line\nSecond line ", "api-key")],
+            [("image-key", window.extraction_calls[0], " First line\nSecond line ")],
         )
         self.assertEqual(worker.finished.calls, [("image-key", 3, 7)])
         self.assertEqual(worker.error.calls, [])
@@ -115,7 +114,6 @@ class DocumentProcessingWorkerTests(unittest.TestCase):
         window._pending_analysis_params = None
         window._session_id = 1
         window._get_selected_file_path = lambda: image_path
-        window._get_gemini_key = lambda: "api-key"
         window._set_status = lambda _message: None
         window._set_qa_group_enabled = lambda _enabled: None
         window._stop_qa_typing_indicator = lambda: None
@@ -143,7 +141,6 @@ class DocumentProcessingWorkerTests(unittest.TestCase):
             window,
             self._image_path(),
             "image-key",
-            "api-key",
             8,
             is_image=True,
         )
@@ -157,9 +154,9 @@ class DocumentProcessingWorkerTests(unittest.TestCase):
         self.assertEqual(worker.finished.calls, [])
         self.assertEqual(worker.error.calls, [("gemini_ocr:quota", 8)])
 
-    def test_pasted_text_passes_captured_key_to_embedding(self):
+    def test_pasted_text_uses_keyless_embedding(self):
         window = _Window()
-        worker = PastedTextProcessWorker(window, "paste-key", " pasted text ", "api-key", 9)
+        worker = PastedTextProcessWorker(window, "paste-key", " pasted text ", 9)
         worker.finished = _Signal()
         worker.error = _Signal()
 
@@ -168,7 +165,7 @@ class DocumentProcessingWorkerTests(unittest.TestCase):
         self.assertEqual(window.manager_requests, 1)
         self.assertEqual(
             window.large_doc_manager.calls,
-            [("paste-key", "pasted:paste-key", "pasted text", "api-key")],
+            [("paste-key", "pasted:paste-key", "pasted text")],
         )
         self.assertEqual(worker.finished.calls, [("paste-key", 3, 9)])
         self.assertEqual(worker.error.calls, [])
@@ -176,7 +173,7 @@ class DocumentProcessingWorkerTests(unittest.TestCase):
     def test_pasted_text_cancellation_emits_no_result_or_error(self):
         window = _Window()
         window.large_doc_manager = _CancellingManager()
-        worker = PastedTextProcessWorker(window, "paste-key", "pasted text", "api-key", 10)
+        worker = PastedTextProcessWorker(window, "paste-key", "pasted text", 10)
         worker.finished = _Signal()
         worker.error = _Signal()
 
